@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="COISaveEditor-Ultimate/COISaveEditor-Ultimate.csproj" />
+  <Project Path="COISaveEditor-Ultimate.Tests/COISaveEditor-Ultimate.Tests.csproj" />
+</Solution>

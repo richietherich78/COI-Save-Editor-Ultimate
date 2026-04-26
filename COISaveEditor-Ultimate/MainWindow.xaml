@@ -1,0 +1,727 @@
+<Window x:Class="COISaveEditorUltimate.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="COI Save Editor — Ultimate"
+        Icon="Assets/app.ico"
+        Height="820" Width="1180"
+        MinHeight="600" MinWidth="900"
+        Background="#0d1117"
+        Foreground="#c9d1d9"
+        AllowDrop="True"
+        Drop="Window_Drop"
+        DragOver="Window_DragOver"
+        FontFamily="Segoe UI" FontSize="13">
+
+    <Window.Resources>
+        <!-- ── Colours ── -->
+        <SolidColorBrush x:Key="BackPrimary"   Color="#0d1117"/>
+        <SolidColorBrush x:Key="BackSecondary" Color="#161b22"/>
+        <SolidColorBrush x:Key="BackTertiary"  Color="#21262d"/>
+        <SolidColorBrush x:Key="BorderBrush"   Color="#30363d"/>
+        <SolidColorBrush x:Key="TextPrimary"   Color="#c9d1d9"/>
+        <SolidColorBrush x:Key="TextMuted"     Color="#8b949e"/>
+        <SolidColorBrush x:Key="Accent"        Color="#58a6ff"/>
+        <SolidColorBrush x:Key="Success"       Color="#3fb950"/>
+        <SolidColorBrush x:Key="Warning"       Color="#d29922"/>
+        <SolidColorBrush x:Key="Danger"        Color="#f85149"/>
+
+        <!-- ── Base button style ── -->
+        <Style x:Key="BtnBase" TargetType="Button">
+            <Setter Property="Background"   Value="#21262d"/>
+            <Setter Property="Foreground"   Value="#c9d1d9"/>
+            <Setter Property="BorderBrush"  Value="#30363d"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding"      Value="14,6"/>
+            <Setter Property="Cursor"       Value="Hand"/>
+            <Setter Property="FontSize"     Value="13"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#30363d"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.4"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="BtnAccent" TargetType="Button" BasedOn="{StaticResource BtnBase}">
+            <Setter Property="Background"  Value="#1f6feb"/>
+            <Setter Property="BorderBrush" Value="#388bfd"/>
+            <Setter Property="Foreground"  Value="#ffffff"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#388bfd"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="BtnDanger" TargetType="Button" BasedOn="{StaticResource BtnBase}">
+            <Setter Property="Background"  Value="#6e2020"/>
+            <Setter Property="BorderBrush" Value="#f85149"/>
+            <Setter Property="Foreground"  Value="#f85149"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#8a2a2a"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- ── Card border ── -->
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Background"       Value="#161b22"/>
+            <Setter Property="BorderBrush"      Value="#30363d"/>
+            <Setter Property="BorderThickness"  Value="1"/>
+            <Setter Property="CornerRadius"     Value="8"/>
+            <Setter Property="Padding"          Value="14"/>
+        </Style>
+
+        <!-- ── Section heading ── -->
+        <Style x:Key="SectionHead" TargetType="TextBlock">
+            <Setter Property="FontWeight"  Value="SemiBold"/>
+            <Setter Property="FontSize"    Value="12"/>
+            <Setter Property="Foreground"  Value="#8b949e"/>
+            <Setter Property="Margin"      Value="0,0,0,8"/>
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+        </Style>
+
+        <!-- ── Tab control ── -->
+        <Style TargetType="TabControl">
+            <Setter Property="Background"      Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding"         Value="0"/>
+        </Style>
+        <Style TargetType="TabItem">
+            <Setter Property="Background"       Value="Transparent"/>
+            <Setter Property="Foreground"       Value="#8b949e"/>
+            <Setter Property="BorderThickness"  Value="0"/>
+            <Setter Property="Padding"          Value="14,8"/>
+            <Setter Property="Margin"           Value="0,0,2,0"/>
+            <Setter Property="FontSize"         Value="13"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="bd"
+                                Background="{TemplateBinding Background}"
+                                BorderThickness="0,0,0,2"
+                                BorderBrush="Transparent"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter ContentSource="Header"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#58a6ff"/>
+                                <Setter Property="Foreground" Value="#c9d1d9"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="#c9d1d9"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ── ScrollBar ── -->
+        <Style TargetType="ScrollBar">
+            <Setter Property="Background" Value="#161b22"/>
+        </Style>
+
+        <!-- ── List checkbox row ── -->
+        <Style x:Key="ModRow" TargetType="Border">
+            <Setter Property="Background"      Value="Transparent"/>
+            <Setter Property="BorderBrush"     Value="#30363d"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            <Setter Property="Padding"         Value="12,8"/>
+            <Setter Property="Cursor"          Value="Hand"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="56"/>   <!-- toolbar -->
+            <RowDefinition Height="*"/>    <!-- body  -->
+            <RowDefinition Height="32"/>   <!-- status bar -->
+        </Grid.RowDefinitions>
+
+        <!-- ══════════════════════════════════════════════════════════════
+             TOOLBAR
+        ═══════════════════════════════════════════════════════════════════ -->
+        <Border Grid.Row="0"
+                Background="#161b22"
+                BorderBrush="#30363d"
+                BorderThickness="0,0,0,1">
+            <StackPanel Orientation="Horizontal"
+                        VerticalAlignment="Center"
+                        Margin="16,0">
+                <Image Source="Assets/logo256.png"
+                       Width="28" Height="28"
+                       RenderOptions.BitmapScalingMode="HighQuality"
+                       VerticalAlignment="Center"
+                       Margin="0,0,10,0"/>
+                <TextBlock Text="COI Save Editor"
+                           FontWeight="Bold" FontSize="16"
+                           Foreground="#c9d1d9"
+                           VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBlock Text="ULTIMATE"
+                           FontSize="9" FontWeight="Bold"
+                           Foreground="#58a6ff"
+                           VerticalAlignment="Center" Margin="0,0,28,0"
+                           Padding="4,2"
+                           Background="#1f2a45"/>
+
+                <Button x:Name="BtnOpenFile"
+                        Content="Open Save File…"
+                        Style="{StaticResource BtnBase}"
+                        Margin="0,0,10,0"
+                        Click="BtnOpenFile_Click"/>
+
+                <Button x:Name="BtnExport"
+                        Content="Export Modified Save…"
+                        Style="{StaticResource BtnAccent}"
+                        IsEnabled="False"
+                        Click="BtnExport_Click"/>
+
+                <Separator Width="1" Background="#30363d" Margin="16,8"/>
+
+                <Button x:Name="BtnSettings"
+                        Content="⚙ Settings"
+                        Style="{StaticResource BtnBase}"
+                        Margin="0,0,10,0"
+                        Click="BtnSettings_Click"/>
+
+                <Separator Width="1" Background="#30363d" Margin="16,8"/>
+
+                <TextBlock x:Name="TxtFileInfo"
+                           Text="Drop a .save file here or click Open"
+                           Foreground="#8b949e"
+                           VerticalAlignment="Center"
+                           FontSize="12"/>
+            </StackPanel>
+        </Border>
+
+        <!-- ══════════════════════════════════════════════════════════════
+             BODY — left panel (mod list) | right panel (tabs)
+        ═══════════════════════════════════════════════════════════════════ -->
+        <Grid Grid.Row="1" Margin="12,12,12,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="420" MinWidth="320"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="*"   MinWidth="300"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- ── LEFT: Mod list ───────────────────────────────────────── -->
+            <DockPanel Grid.Column="0">
+
+                <!-- File info card -->
+                <Border Style="{StaticResource Card}"
+                        DockPanel.Dock="Top"
+                        Margin="0,0,0,10">
+                    <StackPanel>
+                        <TextBlock Text="SAVE FILE INFO" Style="{StaticResource SectionHead}"/>
+                        <Grid x:Name="GridFileInfo">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition/>
+                                <RowDefinition/>
+                                <RowDefinition/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="File:" Foreground="#8b949e" Margin="0,2,12,2"/>
+                            <TextBlock x:Name="TxtSaveFile" Grid.Row="0" Grid.Column="1" Text="—" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Version:" Foreground="#8b949e" Margin="0,2,12,2"/>
+                            <TextBlock x:Name="TxtSaveVersion" Grid.Row="1" Grid.Column="1" Text="—"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Mods:" Foreground="#8b949e" Margin="0,2,12,2"/>
+                            <TextBlock x:Name="TxtModCount" Grid.Row="2" Grid.Column="1" Text="—"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- Mod list card -->
+                <Border Style="{StaticResource Card}">
+                    <DockPanel>
+                        <!-- Header row -->
+                        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                            <TextBlock Text="MODS IN SAVE" Style="{StaticResource SectionHead}"
+                                       VerticalAlignment="Center" DockPanel.Dock="Left"/>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button x:Name="BtnSelectAll"
+                                        Content="Keep All"
+                                        Style="{StaticResource BtnBase}"
+                                        FontSize="11" Padding="8,4"
+                                        IsEnabled="False"
+                                        Click="BtnSelectAll_Click"/>
+                                <Button x:Name="BtnDeselectAll"
+                                        Content="Remove All"
+                                        Style="{StaticResource BtnDanger}"
+                                        FontSize="11" Padding="8,4"
+                                        Margin="6,0,0,0"
+                                        IsEnabled="False"
+                                        Click="BtnDeselectAll_Click"/>
+                            </StackPanel>
+                        </DockPanel>
+
+                        <!-- Warning banner (shown when risky mods are deselected) -->
+                        <Border x:Name="BannerWarning"
+                                DockPanel.Dock="Top"
+                                Visibility="Collapsed"
+                                Background="#1a1200"
+                                BorderBrush="#d29922"
+                                BorderThickness="1"
+                                CornerRadius="6"
+                                Padding="10,8"
+                                Margin="0,0,0,8">
+                            <TextBlock x:Name="TxtWarning"
+                                       TextWrapping="Wrap"
+                                       FontSize="12"
+                                       Foreground="#d29922"/>
+                        </Border>
+
+                        <Border x:Name="BannerError"
+                                DockPanel.Dock="Top"
+                                Visibility="Collapsed"
+                                Background="#1a0000"
+                                BorderBrush="#f85149"
+                                BorderThickness="1"
+                                CornerRadius="6"
+                                Padding="10,8"
+                                Margin="0,0,0,8">
+                            <TextBlock x:Name="TxtError"
+                                       TextWrapping="Wrap"
+                                       FontSize="12"
+                                       Foreground="#f85149"/>
+                        </Border>
+
+                        <!-- Info banner (shown when config-only mods removed via standard export) -->
+                        <Border x:Name="BannerInfo"
+                                DockPanel.Dock="Top"
+                                Visibility="Collapsed"
+                                Background="#0d1a2a"
+                                BorderBrush="#58a6ff"
+                                BorderThickness="1"
+                                CornerRadius="6"
+                                Padding="10,8"
+                                Margin="0,0,0,8">
+                            <TextBlock x:Name="TxtInfo"
+                                       TextWrapping="Wrap"
+                                       FontSize="12"
+                                       Foreground="#58a6ff"/>
+                        </Border>
+
+                        <!-- Drop hint when no file loaded -->
+                        <Border x:Name="DropHint"
+                                DockPanel.Dock="Top"
+                                Background="#0d1117"
+                                BorderBrush="#30363d"
+                                BorderThickness="2"
+                                CornerRadius="6"
+                                Padding="20"
+                                Margin="0,10,0,0">
+                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <Image Source="Assets/logo256.png"
+                                       Width="64" Height="64"
+                                       RenderOptions.BitmapScalingMode="HighQuality"
+                                       HorizontalAlignment="Center"
+                                       Opacity="0.6"/>
+                                <TextBlock Text="COI Save Editor — Ultimate"
+                                           FontSize="16" FontWeight="SemiBold"
+                                           HorizontalAlignment="Center"
+                                           Foreground="#58a6ff" Margin="0,10,0,4"/>
+                                <TextBlock Text="Drop a .save file anywhere or click Open Save File"
+                                           TextWrapping="Wrap" TextAlignment="Center"
+                                           Foreground="#8b949e" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Mod list (visible after loading) -->
+                        <ScrollViewer x:Name="ModListScroll"
+                                      DockPanel.Dock="Top"
+                                      Visibility="Collapsed"
+                                      VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled"
+                                      MaxHeight="500">
+                            <StackPanel x:Name="ModListPanel"/>
+                        </ScrollViewer>
+                    </DockPanel>
+                </Border>
+            </DockPanel>
+
+            <!-- ── SPLITTER ── -->
+            <GridSplitter Grid.Column="1"
+                          Width="4"
+                          HorizontalAlignment="Center"
+                          Background="#30363d"
+                          ResizeBehavior="PreviousAndNext"/>
+
+            <!-- ── RIGHT: Tabs ────────────────────────────────────────── -->
+            <TabControl Grid.Column="2">
+
+                <!-- ── Tab 1: RESOLVER Types ── -->
+                <TabItem Header="RESOLVER Types">
+                    <Border Style="{StaticResource Card}" Margin="0,8,0,0">
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Top"
+                                       Text="TYPES STORED IN RESOLVER CHUNK"
+                                       Style="{StaticResource SectionHead}"/>
+                            <TextBlock DockPanel.Dock="Top"
+                                       TextWrapping="Wrap"
+                                       FontSize="11"
+                                       Foreground="#8b949e"
+                                       Margin="0,0,0,10">
+                                Every assembly-qualified type name found in the RESOLVER chunk
+                                via heuristic string scan.  Types here require their mod DLLs to
+                                be present when loading the save — removing their mod without
+                                stripping these entries will cause CorruptedSaveException.
+                            </TextBlock>
+
+                            <TextBlock x:Name="TxtResolverHint"
+                                       DockPanel.Dock="Top"
+                                       Text="Load a save file to see its RESOLVER types."
+                                       Foreground="#8b949e" FontSize="12"/>
+
+                            <TreeView x:Name="ResolverTree"
+                                      Background="Transparent"
+                                      BorderThickness="0"
+                                      Foreground="#c9d1d9"
+                                      FontSize="12"
+                                      Visibility="Collapsed">
+                                <TreeView.Resources>
+                                    <Style TargetType="TreeViewItem">
+                                        <Setter Property="Background"    Value="Transparent"/>
+                                        <Setter Property="Foreground"    Value="#c9d1d9"/>
+                                        <Setter Property="BorderThickness" Value="0"/>
+                                        <Setter Property="Padding"       Value="2"/>
+                                    </Style>
+                                </TreeView.Resources>
+                            </TreeView>
+                        </DockPanel>
+                    </Border>
+                </TabItem>
+
+                <!-- ── Tab 2: Export ── -->
+                <TabItem Header="Export &amp; Info">
+                    <Border Style="{StaticResource Card}" Margin="0,8,0,0">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel>
+                                <TextBlock Text="HOW THE SENTINEL EXPORT WORKS"
+                                           Style="{StaticResource SectionHead}"/>
+
+                                <TextBlock TextWrapping="Wrap" FontSize="12"
+                                           Foreground="#c9d1d9" Margin="0,0,0,10">
+                                    <Run FontWeight="Bold">What it does:</Run> Mods you un-check have their IDs
+                                    in the MOD_TYPES chunk replaced with sentinel placeholders
+                                    (__safe_to_delete_0__, __safe_to_delete_1__, …).  The RESOLVER, CONFIGS, and
+                                    SAVE_INFO chunks are kept byte-for-byte identical.  CRC32s and
+                                    gzip wrapper are recomputed.
+                                </TextBlock>
+
+                                <TextBlock TextWrapping="Wrap" FontSize="12"
+                                           Foreground="#c9d1d9" Margin="0,0,0,10">
+                                    <Run FontWeight="Bold">Why sentinels?</Run> The MOD_TYPES string table
+                                    is shared by all later chunks.  Replacing an entry with a same-slot
+                                    sentinel preserves every downstream back-reference index — no bytes
+                                    further in the file need to change.
+                                </TextBlock>
+
+                                <TextBlock TextWrapping="Wrap" FontSize="12"
+                                           Foreground="#c9d1d9" Margin="0,0,0,10">
+                                    <Run FontWeight="Bold">Configs are gracefully skipped (sometimes):</Run> For mods whose
+                                    only footprint is an IConfig entry in the CONFIGS chunk, the game
+                                    tries to skip unknown types.  However, this can FAIL if the config
+                                    is large or contains string/object references.  Use Deep Edit for
+                                    mods with complex configs.
+                                </TextBlock>
+
+                                <Border Background="#1a1a00"
+                                        BorderBrush="#d29922" BorderThickness="1"
+                                        CornerRadius="6" Padding="10,8" Margin="0,0,0,10">
+                                    <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="#d29922">
+                                        <Run FontWeight="Bold">⚠ Entity mods (Has Entities badge):</Run> Only safe
+                                        if you've never placed any of the mod's specific entities on the map.
+                                        Load the save in-game first, demolish all those buildings, save, then
+                                        export here.
+                                    </TextBlock>
+                                </Border>
+
+                                <Border Background="#1a0000"
+                                        BorderBrush="#f85149" BorderThickness="1"
+                                        CornerRadius="6" Padding="10,8" Margin="0,0,0,10">
+                                    <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="#f85149">
+                                        <Run FontWeight="Bold">✖ Cannot Remove mods (Standard Export):</Run> These mods register
+                                        serialisable GlobalDependency services that are written to the RESOLVER
+                                        for every save, even with zero custom buildings placed.  The sentinel
+                                        approach cannot help here — use Deep Edit instead, which re-serialises
+                                        ALL chunks (MOD_TYPES, CONFIGS, RESOLVER) through one writer, stripping
+                                        configs and objects from removed mods.
+                                    </TextBlock>
+                                </Border>
+
+                                <Separator Background="#30363d" Margin="0,8"/>
+
+                                <TextBlock Text="EXPORT"
+                                           Style="{StaticResource SectionHead}"/>
+
+                                <Button x:Name="BtnExport2"
+                                        Content="Export Modified Save…"
+                                        Style="{StaticResource BtnAccent}"
+                                        IsEnabled="False"
+                                        HorizontalAlignment="Left"
+                                        Click="BtnExport_Click"/>
+
+                                <TextBlock x:Name="TxtExportStatus"
+                                           Margin="0,10,0,0"
+                                           FontSize="12"
+                                           Foreground="#3fb950"
+                                           Visibility="Collapsed"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Border>
+                </TabItem>
+
+                <!-- ── Tab 3: Deep Edit ── -->
+                <TabItem Header="Deep Edit">
+                    <Border Style="{StaticResource Card}" Margin="0,8,0,0">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel>
+
+                                <!-- ── Section: How it works ── -->
+                                <TextBlock Text="DEEP RESOLVER EDITING"
+                                           Style="{StaticResource SectionHead}"/>
+                                <TextBlock TextWrapping="Wrap" FontSize="12"
+                                           Foreground="#c9d1d9" Margin="0,0,0,12">
+                                    Deep Edit loads the game DLLs and all active mod DLLs into this process so
+                                    that every type in the RESOLVER chunk can be fully deserialised using the
+                                    game's own <Bold>BlobReader</Bold>.  Objects belonging to the mods you want
+                                    to remove are then stripped from the DependencyResolver, and the whole save
+                                    is re-serialised — enabling proper removal of
+                                    <Bold>Cannot Remove</Bold> mods like COIExtended-Core.
+                                </TextBlock>
+
+                                <Separator Background="#30363d" Margin="0,0,0,12"/>
+
+                                <!-- ── DLL Configuration Status Banner ── -->
+                                <Border x:Name="DllConfigBanner"
+                                        Background="#1a1200"
+                                        BorderBrush="#d29922"
+                                        BorderThickness="1"
+                                        CornerRadius="6"
+                                        Padding="10,8"
+                                        Margin="0,0,0,12">
+                                    <DockPanel>
+                                        <Button DockPanel.Dock="Right"
+                                                Content="Open Settings"
+                                                Style="{StaticResource BtnBase}"
+                                                FontSize="11" Padding="10,4"
+                                                Margin="12,0,0,0"
+                                                VerticalAlignment="Center"
+                                                Click="BtnSettings_Click"/>
+                                        <TextBlock x:Name="TxtDllConfigStatus"
+                                                   TextWrapping="Wrap"
+                                                   FontSize="12"
+                                                   Foreground="#d29922"
+                                                   VerticalAlignment="Center"
+                                                   Text="⚠ Game DLLs not configured. Open Settings to set the game Managed folder and add mod/DLC DLLs."/>
+                                    </DockPanel>
+                                </Border>
+
+                                <!-- ── Load Assemblies ── -->
+                                <TextBlock Text="LOAD ASSEMBLIES"
+                                           Style="{StaticResource SectionHead}"/>
+
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <Button x:Name="BtnLoadAssemblies"
+                                            Content="Load Game + Mod DLLs"
+                                            Style="{StaticResource BtnBase}"
+                                            IsEnabled="False"
+                                            Click="BtnLoadAssemblies_Click"/>
+                                    <Button x:Name="BtnLoadFolder"
+                                            Content="Load Folder…"
+                                            Style="{StaticResource BtnBase}"
+                                            Margin="8,0,0,0"
+                                            ToolTip="Recursively load all DLLs from a folder and its subfolders"
+                                            Click="BtnLoadFolder_Click"/>
+                                    <TextBlock x:Name="TxtAssemblyStatus"
+                                               VerticalAlignment="Center"
+                                               FontSize="12" Foreground="#8b949e"
+                                               Margin="12,0,0,0"
+                                               Text="Not loaded"/>
+                                </StackPanel>
+
+                                <!-- Assembly load log (collapsed by default) -->
+                                <Expander x:Name="AssemblyLogExpander"
+                                          Header="Assembly Load Log"
+                                          Foreground="#8b949e"
+                                          FontSize="11"
+                                          IsExpanded="False"
+                                          Margin="0,0,0,12">
+                                    <Border x:Name="AssemblyLogBorder"
+                                            Background="#0d1117"
+                                            BorderBrush="#30363d"
+                                            BorderThickness="1"
+                                            CornerRadius="4"
+                                            Padding="8"
+                                            Margin="0,4,0,0">
+                                        <ScrollViewer MaxHeight="140" VerticalScrollBarVisibility="Auto">
+                                            <TextBox x:Name="TxtAssemblyLog"
+                                                     IsReadOnly="True"
+                                                     Background="Transparent"
+                                                     BorderThickness="0"
+                                                     Padding="0"
+                                                     FontSize="11"
+                                                     FontFamily="Consolas"
+                                                     Foreground="#8b949e"
+                                                     TextWrapping="Wrap"
+                                                     AcceptsReturn="True"
+                                                     IsTabStop="False"/>
+                                        </ScrollViewer>
+                                    </Border>
+                                </Expander>
+
+                                <Separator Background="#30363d" Margin="0,0,0,12"/>
+
+                                <!-- ── Section: Execute deep edit ── -->
+                                <TextBlock Text="RUN DEEP EDIT"
+                                           Style="{StaticResource SectionHead}"/>
+                                <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="#8b949e" Margin="0,0,0,8">
+                                    Un-check the mods to remove in the left panel, then click Run.
+                                    A new save file will be written with those mods' objects fully stripped
+                                    from the RESOLVER.
+                                </TextBlock>
+
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <Button x:Name="BtnRunDeepEdit"
+                                            Content="Run Deep Edit &amp; Export…"
+                                            Style="{StaticResource BtnAccent}"
+                                            IsEnabled="False"
+                                            Click="BtnRunDeepEdit_Click"/>
+                                    <Button x:Name="BtnCancelDeepEdit"
+                                            Content="Cancel"
+                                            Style="{StaticResource BtnBase}"
+                                            IsEnabled="False"
+                                            Margin="8,0,0,0"
+                                            Click="BtnCancelDeepEdit_Click"/>
+                                </StackPanel>
+
+                                <CheckBox x:Name="ChkAllowBrokenSaveOutput"
+                                          Content="Force-write save even if validator finds removed-mod type strings (game may crash on load)"
+                                          Foreground="#f0883e"
+                                          FontSize="12"
+                                          Margin="0,0,0,8"
+                                          ToolTip="If the validator detects unloadable type strings in the produced payload, normally we refuse to write the .save. Tick this to write it anyway — useful when you want to test whether the game's loader actually crashes on the residual references."/>
+
+                                <!-- Overall step progress -->
+                                <Grid Margin="0,0,0,4">
+                                    <ProgressBar x:Name="DeepEditStepBar"
+                                                 Visibility="Collapsed"
+                                                 IsIndeterminate="False"
+                                                 Minimum="0" Maximum="8" Value="0"
+                                                 Height="22"
+                                                 Background="#21262d"
+                                                 Foreground="#238636"
+                                                 BorderThickness="0"/>
+                                    <TextBlock x:Name="TxtDeepEditStep"
+                                               Visibility="Collapsed"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               FontSize="11" FontWeight="SemiBold"
+                                               Foreground="#c9d1d9"
+                                               Text="Step 0/8"/>
+                                </Grid>
+
+                                <!-- Detail progress within current step -->
+                                <Grid Margin="0,0,0,8">
+                                    <ProgressBar x:Name="DeepEditProgress"
+                                                 Visibility="Collapsed"
+                                                 IsIndeterminate="False"
+                                                 Minimum="0" Maximum="100" Value="0"
+                                                 Height="18"
+                                                 Background="#21262d"
+                                                 Foreground="#58a6ff"
+                                                 BorderThickness="0"/>
+                                    <TextBlock x:Name="TxtDeepEditPercent"
+                                               Visibility="Collapsed"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               FontSize="11" FontWeight="SemiBold"
+                                               Foreground="#c9d1d9"
+                                               Text="0%"/>
+                                </Grid>
+
+                                <Border x:Name="DeepEditLogBorder"
+                                        Visibility="Collapsed"
+                                        Background="#0d1117"
+                                        BorderBrush="#30363d"
+                                        BorderThickness="1"
+                                        CornerRadius="4"
+                                        Padding="8"
+                                        Margin="0,0,0,16">
+                                    <ScrollViewer x:Name="DeepEditLogScroll"
+                                                  MaxHeight="360"
+                                                  VerticalScrollBarVisibility="Auto">
+                                        <StackPanel>
+                                            <TextBox x:Name="TxtDeepEditLog"
+                                                     IsReadOnly="True"
+                                                     Background="Transparent"
+                                                     BorderThickness="0"
+                                                     Padding="0"
+                                                     FontSize="11"
+                                                     FontFamily="Consolas"
+                                                     Foreground="#8b949e"
+                                                     TextWrapping="Wrap"
+                                                     AcceptsReturn="True"
+                                                     IsTabStop="False"/>
+                                            <TextBox x:Name="TxtDeepEditResult"
+                                                     Visibility="Collapsed"
+                                                     IsReadOnly="True"
+                                                     Background="Transparent"
+                                                     BorderThickness="0"
+                                                     Padding="0"
+                                                     FontSize="12"
+                                                     TextWrapping="Wrap"
+                                                     AcceptsReturn="True"
+                                                     IsTabStop="False"
+                                                     FontWeight="SemiBold"
+                                                     Margin="0,10,0,4"/>
+                                        </StackPanel>
+                                    </ScrollViewer>
+                                </Border>
+
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Border>
+                </TabItem>
+
+            </TabControl>
+        </Grid>
+
+        <!-- ══════════════════════════════════════════════════════════════
+             STATUS BAR
+        ═══════════════════════════════════════════════════════════════════ -->
+        <Border Grid.Row="2"
+                Background="#161b22"
+                BorderBrush="#30363d"
+                BorderThickness="0,1,0,0">
+            <TextBlock x:Name="TxtStatus"
+                       Margin="16,0"
+                       VerticalAlignment="Center"
+                       FontSize="11"
+                       Foreground="#8b949e"
+                       Text="Ready."/>
+        </Border>
+    </Grid>
+</Window>

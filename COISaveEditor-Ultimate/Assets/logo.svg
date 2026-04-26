@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a2332"/>
+      <stop offset="100%" style="stop-color:#0d1117"/>
+    </linearGradient>
+    <!-- Accent gradient -->
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#79c0ff"/>
+      <stop offset="100%" style="stop-color:#388bfd"/>
+    </linearGradient>
+    <!-- Gear gradient -->
+    <linearGradient id="gearGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3fb950"/>
+      <stop offset="100%" style="stop-color:#238636"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="8" y="8" width="240" height="240" rx="40" ry="40" fill="url(#bgGrad)" stroke="#30363d" stroke-width="3"/>
+
+  <!-- Floppy disk / save icon body -->
+  <path d="M60,56 L176,56 L196,76 L196,200 L60,200 Z"
+        fill="none" stroke="url(#accentGrad)" stroke-width="7" stroke-linejoin="round" stroke-linecap="round"/>
+
+  <!-- Floppy disk top notch (label area) -->
+  <rect x="88" y="56" width="72" height="40" rx="3" fill="url(#accentGrad)" opacity="0.25"/>
+  <rect x="88" y="56" width="72" height="40" rx="3" fill="none" stroke="url(#accentGrad)" stroke-width="4"/>
+
+  <!-- Floppy disk bottom window (data area) -->
+  <rect x="80" y="130" width="96" height="56" rx="6" fill="url(#accentGrad)" opacity="0.12"/>
+  <rect x="80" y="130" width="96" height="56" rx="6" fill="none" stroke="url(#accentGrad)" stroke-width="4"/>
+
+  <!-- Data lines inside bottom window -->
+  <line x1="92" y1="146" x2="132" y2="146" stroke="#58a6ff" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+  <line x1="92" y1="158" x2="152" y2="158" stroke="#58a6ff" stroke-width="3" stroke-linecap="round" opacity="0.5"/>
+  <line x1="92" y1="170" x2="120" y2="170" stroke="#58a6ff" stroke-width="3" stroke-linecap="round" opacity="0.35"/>
+
+  <!-- Gear (bottom-right, overlapping the disk) — represents "editing" -->
+  <g transform="translate(178,182)">
+    <!-- Gear teeth + body -->
+    <path d="M0,-28 L6,-26 L8,-20 L14,-18 L20,-22 L26,-16 L22,-10 L24,-4 L30,0
+             L28,6 L22,8 L20,14 L24,20 L18,24 L14,20 L8,22 L6,28 L0,28
+             L-6,26 L-8,20 L-14,18 L-20,22 L-26,16 L-22,10 L-24,4 L-30,0
+             L-28,-6 L-22,-8 L-20,-14 L-24,-20 L-18,-24 L-14,-20 L-8,-22 L-6,-28 Z"
+          fill="url(#gearGrad)" opacity="0.9"/>
+    <!-- Gear center hole -->
+    <circle cx="0" cy="0" r="10" fill="#0d1117"/>
+    <circle cx="0" cy="0" r="10" fill="none" stroke="#238636" stroke-width="2"/>
+  </g>
+</svg>

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>COISaveEditorUltimate</RootNamespace>
+    <AssemblyName>COISaveEditor-Ultimate</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <!-- Exclude workspace-files (decompiled API code, reference DLLs) from compilation -->
+  <ItemGroup>
+    <Compile Remove="workspace-files\**" />
+    <None Remove="workspace-files\**" />
+    <EmbeddedResource Remove="workspace-files\**" />
+  </ItemGroup>
+
+  <!-- Game DLLs are loaded at RUNTIME via Assembly.LoadFrom for Deep Edit.
+       Referencing them at build-time causes transitive BCL version conflicts
+       (Mafi.dll ships its own System.IO.Compression.dll from Unity Mono).
+       Do NOT add them as <Reference> items here. -->
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Hashing" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\logo256.png" />
+    <Resource Include="Assets\app.ico" />
+  </ItemGroup>
+</Project>

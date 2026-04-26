@@ -1,0 +1,194 @@
+<Window x:Class="COISaveEditorUltimate.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Settings — COI Save Editor"
+        Height="620" Width="680"
+        MinHeight="500" MinWidth="520"
+        Background="#0d1117"
+        Foreground="#c9d1d9"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResizeWithGrip"
+        FontFamily="Segoe UI" FontSize="13">
+
+    <Window.Resources>
+        <!-- Re-use the same dark theme styling -->
+        <Style x:Key="BtnBase" TargetType="Button">
+            <Setter Property="Background"   Value="#21262d"/>
+            <Setter Property="Foreground"   Value="#c9d1d9"/>
+            <Setter Property="BorderBrush"  Value="#30363d"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding"      Value="14,6"/>
+            <Setter Property="Cursor"       Value="Hand"/>
+            <Setter Property="FontSize"     Value="13"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#30363d"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.4"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="BtnAccent" TargetType="Button" BasedOn="{StaticResource BtnBase}">
+            <Setter Property="Background"  Value="#1f6feb"/>
+            <Setter Property="BorderBrush" Value="#388bfd"/>
+            <Setter Property="Foreground"  Value="#ffffff"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#388bfd"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="SectionHead" TargetType="TextBlock">
+            <Setter Property="FontWeight"  Value="SemiBold"/>
+            <Setter Property="FontSize"    Value="12"/>
+            <Setter Property="Foreground"  Value="#8b949e"/>
+            <Setter Property="Margin"      Value="0,0,0,8"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>  <!-- title -->
+            <RowDefinition Height="*"/>     <!-- content -->
+            <RowDefinition Height="Auto"/>  <!-- buttons -->
+        </Grid.RowDefinitions>
+
+        <!-- ── Title ── -->
+        <TextBlock Grid.Row="0"
+                   Text="Application Settings"
+                   FontSize="18" FontWeight="Bold"
+                   Foreground="#c9d1d9"
+                   Margin="0,0,0,16"/>
+
+        <!-- ── Content ── -->
+        <ScrollViewer Grid.Row="1"
+                      VerticalScrollBarVisibility="Auto"
+                      Margin="0,0,0,16">
+            <StackPanel>
+
+                <!-- ═══ Section 1: Game Managed Folder ═══ -->
+                <Border Background="#161b22" BorderBrush="#30363d" BorderThickness="1"
+                        CornerRadius="8" Padding="14" Margin="0,0,0,14">
+                    <StackPanel>
+                        <TextBlock Text="GAME MANAGED FOLDER" Style="{StaticResource SectionHead}"/>
+                        <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="#8b949e" Margin="0,0,0,10">
+                            Point to the game's <Bold>Managed</Bold> folder that contains
+                            <Bold>Mafi.dll</Bold>, <Bold>Mafi.Core.dll</Bold>, and all game assemblies.
+                            <LineBreak/>
+                            <Run FontStyle="Italic" Foreground="#58a6ff">Typical path:</Run>
+                            <Run FontFamily="Consolas" FontSize="11">...\steamapps\common\Captain of Industry\Captain of Industry_Data\Managed</Run>
+                        </TextBlock>
+
+                        <DockPanel Margin="0,0,0,4">
+                            <Button x:Name="BtnBrowseGameFolder"
+                                    DockPanel.Dock="Right"
+                                    Content="Browse…"
+                                    Style="{StaticResource BtnBase}"
+                                    Padding="10,5"
+                                    Click="BtnBrowseGameFolder_Click"/>
+                            <TextBox x:Name="TxtGameFolder"
+                                     Background="#0d1117"
+                                     Foreground="#c9d1d9"
+                                     BorderBrush="#30363d"
+                                     CaretBrush="#c9d1d9"
+                                     FontSize="12"
+                                     Padding="8,5"
+                                     Margin="0,0,8,0"
+                                     TextChanged="TxtGameFolder_TextChanged"/>
+                        </DockPanel>
+                        <TextBlock x:Name="TxtGameFolderStatus"
+                                   FontSize="11" Foreground="#8b949e"
+                                   Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- ═══ Section 2: Mod & DLC DLLs ═══ -->
+                <Border Background="#161b22" BorderBrush="#30363d" BorderThickness="1"
+                        CornerRadius="8" Padding="14" Margin="0,0,0,14">
+                    <StackPanel>
+                        <TextBlock Text="MOD &amp; DLC DLL PATHS" Style="{StaticResource SectionHead}"/>
+                        <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="#8b949e" Margin="0,0,0,6">
+                            Add the DLL for each <Bold>mod</Bold> and <Bold>DLC</Bold> that was active
+                            when the save was created. You may add individual DLL files or entire folders.
+                        </TextBlock>
+
+                        <Border Background="#1a1200" BorderBrush="#d29922" BorderThickness="1"
+                                CornerRadius="6" Padding="10,8" Margin="0,0,0,10">
+                            <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="#d29922">
+                                <Run FontWeight="SemiBold">⚠ Don't forget DLC DLLs!</Run>
+                                <LineBreak/>
+                                If the save uses the Trains DLC, Supporters Edition, or other official DLCs,
+                                add their DLLs too (e.g. <Run FontFamily="Consolas" FontSize="11">Mafi.TrainsDlc.dll</Run>).
+                                DLC DLLs are typically found in the game's Managed folder.
+                            </TextBlock>
+                        </Border>
+
+                        <DockPanel Margin="0,0,0,4">
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                <Button x:Name="BtnRemoveModDll"
+                                        Content="Remove"
+                                        Style="{StaticResource BtnBase}"
+                                        Padding="10,5"
+                                        Margin="0,0,8,0"
+                                        Click="BtnRemoveModDll_Click"/>
+                                <Button x:Name="BtnAddModDll"
+                                        Content="Add DLL / Folder…"
+                                        Style="{StaticResource BtnBase}"
+                                        Padding="10,5"
+                                        Click="BtnAddModDll_Click"/>
+                            </StackPanel>
+                            <TextBlock/>  <!-- spacer -->
+                        </DockPanel>
+
+                        <ListBox x:Name="ModDllList"
+                                 Background="#0d1117"
+                                 Foreground="#c9d1d9"
+                                 BorderBrush="#30363d"
+                                 FontSize="12"
+                                 MinHeight="80"
+                                 MaxHeight="200"
+                                 Margin="0,4,0,0"
+                                 SelectionMode="Single"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- ═══ Section 3: Quick info ═══ -->
+                <Border Background="#0d1a2a" BorderBrush="#58a6ff" BorderThickness="1"
+                        CornerRadius="6" Padding="10,8" Margin="0,0,0,4">
+                    <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="#58a6ff">
+                        <Run FontWeight="SemiBold">ℹ These settings are saved automatically</Run> and
+                        persist between sessions. Both the Standard Export and Deep Edit features
+                        use these paths to load the assemblies needed for proper save editing.
+                    </TextBlock>
+                </Border>
+
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- ── Buttons ── -->
+        <StackPanel Grid.Row="2"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right">
+            <Button Content="Close"
+                    Style="{StaticResource BtnAccent}"
+                    Padding="20,8"
+                    Click="BtnClose_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
