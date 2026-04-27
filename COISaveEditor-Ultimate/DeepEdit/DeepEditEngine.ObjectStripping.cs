@@ -3260,6 +3260,233 @@ public sealed partial class DeepEditEngine
         progress?.Report($"  Removed-mod entity ref nuller: {nulled} reference(s) nulled across {visits:N0} object(s){(budgetHit ? " (visit budget hit)" : "")}.");
     }
 
+    // ── Dict<entity, V> key scrub ─────────────────────────────────────────────
+    //
+    // The BFS in NullAllRemovedModEntityReferences nulls reference-type fields and
+    // removes stripped elements from IEnumerable collections. However, it cannot
+    // remove KEYS from Dict<K,V> when K is a reference type (interface or class),
+    // because iterating the dict yields KeyValuePair<K,V> VALUE TYPES — and the BFS
+    // skips all value-type elements. Those surviving stripped-entity keys are then
+    // written by BlobWriter with their mod-assembly AQN; the AQN patcher rewrites
+    // them to System.Object, which passes validation but causes the game to crash on
+    // load ("Failed to deserialize type 'Object' … not assignable to IStaticEntity").
+    //
+    // Known victim: VehicleBuffersRegistry.m_registeredBuffersPerEntity:
+    //   Dict<IStaticEntity, RegisteredBuffersPerEntity>
+    //
+    // This pass scans every resolver object for Mafi Dict<K,V> fields where K is a
+    // non-proto reference type, and removes any entry whose key's concrete runtime
+    // type belongs to a stripped assembly.
+
+    /// <summary>
+    /// Removes entries from Mafi <c>Dict&lt;K,V&gt;</c> fields on resolver objects where
+    /// the key's concrete runtime type is from a stripped-mod assembly. Handles cases
+    /// like <c>VehicleBuffersRegistry.m_registeredBuffersPerEntity</c> where the BFS
+    /// cannot reach the keys because <c>KeyValuePair&lt;K,V&gt;</c> is a value type.
+    /// </summary>
+    private void ScrubStrippedEntityKeysFromManagerDicts(
+        object resolver, HashSet<string> stripAssemblies, IProgress<string>? progress)
+    {
+        if (stripAssemblies.Count == 0)
+        {
+            progress?.Report("  [dict-key-scrub] No strip assemblies — skipping.");
+            return;
+        }
+
+        var tProto = AssemblyLoader.FindType("Mafi.Core.Prototypes.Proto");
+        const BindingFlags allFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        int totalRemoved = 0;
+        int dictsScanned = 0;
+
+        // Collect all resolver objects to scan — mirror the seed strategy used by
+        // NullAllRemovedModEntityReferences so we find managers like VehicleBuffersRegistry
+        // that are registered AsEverything and live in the type-keyed instance dicts,
+        // not necessarily in m_resolvedObjects.
+        var objectsToScan = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        try
+        {
+            var fiResolved = FindFieldDeep(resolver.GetType(), "m_resolvedObjects");
+            if (fiResolved?.GetValue(resolver) is System.Collections.IEnumerable resolved)
+                foreach (var o in resolved) if (o is not null) objectsToScan.Add(o);
+        }
+        catch { }
+
+        void SeedFromResolverDict(string dictFieldName)
+        {
+            try
+            {
+                var fi = FindFieldDeep(resolver.GetType(), dictFieldName);
+                if (fi?.GetValue(resolver) is not System.Collections.IEnumerable dict) return;
+                foreach (var kv in dict)
+                {
+                    if (kv is null) continue;
+                    var valProp = kv.GetType().GetProperty("Value", BindingFlags.Public | BindingFlags.Instance);
+                    if (valProp?.GetValue(kv) is object v) objectsToScan.Add(v);
+                }
+            }
+            catch { }
+        }
+        SeedFromResolverDict("m_resolvedInstancesByRealType");
+        SeedFromResolverDict("m_resolvedInstancesByRegisteredType");
+
+        foreach (var obj in objectsToScan)
+        {
+            if (obj is null) continue;
+            var objType = obj.GetType();
+            if (ShouldStrip(objType, stripAssemblies)) continue;
+
+            for (var cur = objType; cur != null && cur != typeof(object); cur = cur.BaseType)
+            {
+                FieldInfo[] fields;
+                try { fields = cur.GetFields(allFlags | BindingFlags.DeclaredOnly); }
+                catch { continue; }
+
+                foreach (var fi in fields)
+                {
+                    var ft = fi.FieldType;
+                    if (ft.IsValueType) continue;
+                    if (!ft.IsGenericType) continue;
+
+                    var typeArgs = ft.GetGenericArguments();
+                    if (typeArgs.Length < 2) continue;
+                    var keyType = typeArgs[0];
+
+                    // Only care about reference-type keys that are NOT protos.
+                    // Proto-keyed dicts are handled by StripPhantomProtoRefsFromCollections.
+                    if (keyType.IsValueType) continue;
+                    if (tProto != null && tProto.IsAssignableFrom(keyType)) continue;
+
+                    object? dictVal;
+                    try { dictVal = fi.GetValue(obj); }
+                    catch { continue; }
+                    if (dictVal is null) continue;
+
+                    var dictType = dictVal.GetType();
+
+                    // Read the dict's m_entries array directly — bypasses GetEnumerator() which
+                    // throws "not initialized after load" if m_buckets hasn't been rebuilt yet.
+                    //
+                    // Mafi Dict has two states when we see it:
+                    //  A) initAfterLoad HAS run (m_buckets != null):
+                    //       m_count = used slots, HashCode >= 0 → live entry.
+                    //  B) initAfterLoad NOT yet run (m_buckets == null, m_entries != null):
+                    //       DeserializeData built m_entries[0..num-1] with HashCode=0;
+                    //       m_count is still the default 0.
+                    //       Iterate m_entries.Length slots; treat all non-null keys as live.
+                    var fiEntries  = FindFieldDeep(dictType, "m_entries");
+                    var fiCount    = FindFieldDeep(dictType, "m_count");
+                    var fiBuckets  = FindFieldDeep(dictType, "m_buckets");
+                    if (fiEntries is null || fiCount is null) continue;
+
+                    Array? entries;
+                    int    mCount;
+                    bool   bucketsBuilt;
+                    try
+                    {
+                        entries      = fiEntries.GetValue(dictVal) as Array;
+                        mCount       = (int)(fiCount.GetValue(dictVal) ?? 0);
+                        bucketsBuilt = fiBuckets != null && fiBuckets.GetValue(dictVal) != null;
+                    }
+                    catch { continue; }
+
+                    // If initAfterLoad ran: iterate [0, m_count); live = HashCode >= 0.
+                    // If NOT ran: iterate all of m_entries; all non-null keys are live
+                    //   (DeserializeData sets HashCode = 0 for every entry it writes).
+                    int iterLimit = bucketsBuilt ? mCount : (entries?.Length ?? 0);
+                    if (entries is null || iterLimit == 0) continue;
+
+                    // Each element is an Entry struct { HashCode, NextEntryIndex, Key, Value }.
+                    // State A (initAfterLoad ran):    HashCode >= 0 → live,  < 0 → deleted.
+                    // State B (initAfterLoad NOT ran): every entry is live (HashCode = 0,
+                    //    set by DeserializeData's `new Entry(0,0,key,value)`).
+                    try
+                    {
+                        var entryType  = entries.GetType().GetElementType();
+                        if (entryType is null) continue;
+                        var fiHashCode = entryType.GetField("HashCode",
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        var fiEntryKey = entryType.GetField("Key",
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (fiHashCode is null || fiEntryKey is null) continue;
+
+                        if (bucketsBuilt)
+                        {
+                            // ── State A: dict is fully initialized — call Remove(key). ──────
+                            var strippedKeys = new List<object>();
+                            for (int ei = 0; ei < iterLimit; ei++)
+                            {
+                                var entry = entries.GetValue(ei);
+                                if (entry is null) continue;
+                                int hc = (int)(fiHashCode.GetValue(entry) ?? -1);
+                                if (hc < 0) continue; // deleted/empty slot
+                                var key = fiEntryKey.GetValue(entry);
+                                if (key is null) continue;
+                                if (ShouldStrip(key.GetType(), stripAssemblies))
+                                    strippedKeys.Add(key);
+                            }
+                            if (strippedKeys.Count == 0) continue;
+
+                            var removeMethod = dictType.GetMethod("Remove", new[] { keyType });
+                            if (removeMethod is null) continue;
+
+                            dictsScanned++;
+                            int removedFromThis = 0;
+                            foreach (var key in strippedKeys)
+                            {
+                                try { removeMethod.Invoke(dictVal, new[] { key }); removedFromThis++; }
+                                catch { }
+                            }
+                            totalRemoved += removedFromThis;
+                            progress?.Report(
+                                $"  [dict-key-scrub] {objType.Name}.{fi.Name}: " +
+                                $"removed {removedFromThis}/{strippedKeys.Count} stripped-entity key(s).");
+                        }
+                        else
+                        {
+                            // ── State B: initAfterLoad NOT yet called (Phase 3 skipped). ────
+                            // m_entries is the raw deserialized array; all entries are live.
+                            // Remove by rebuilding m_entries WITHOUT the stripped entries.
+                            // The game's own initAfterLoad (on save load) will re-index from
+                            // the compacted array, so no stripped keys end up in the final dict.
+                            int strippedCount = 0;
+                            var keptEntries = new System.Collections.ArrayList(iterLimit);
+                            for (int ei = 0; ei < iterLimit; ei++)
+                            {
+                                var entry = entries.GetValue(ei);
+                                var key   = entry is null ? null : fiEntryKey.GetValue(entry);
+                                if (key is not null && ShouldStrip(key.GetType(), stripAssemblies))
+                                {
+                                    strippedCount++;
+                                }
+                                else
+                                {
+                                    keptEntries.Add(entry);
+                                }
+                            }
+                            if (strippedCount == 0) continue;
+
+                            // Replace m_entries with the compacted array; leave m_count = 0
+                            // (initAfterLoad will recompute it from the new array).
+                            var newEntries = Array.CreateInstance(entryType, keptEntries.Count);
+                            for (int i = 0; i < keptEntries.Count; i++)
+                                newEntries.SetValue(keptEntries[i], i);
+                            fiEntries.SetValue(dictVal, newEntries);
+
+                            dictsScanned++;
+                            totalRemoved += strippedCount;
+                            progress?.Report(
+                                $"  [dict-key-scrub] {objType.Name}.{fi.Name}: " +
+                                $"removed {strippedCount} stripped-entity key(s) (pre-init compaction, {keptEntries.Count} kept).");
+                        }
+                    }
+                    catch { continue; }
+                }
+            }
+        }
+
+        progress?.Report($"  [dict-key-scrub] Done: {totalRemoved} key(s) removed across {dictsScanned} dict field(s).");
+    }
+
     /// <summary>
     /// Adds every non-null Value of the dictionary stored in <paramref name="resolver"/>'s
     /// field <paramref name="dictFieldName"/> to <paramref name="roots"/>. The dict is
@@ -3352,8 +3579,8 @@ public sealed partial class DeepEditEngine
         int dictTypeEntriesDropped = 0;
         int objectsScanned = 0;
         int logBudget = 50;
-        const int VisitBudget = 500_000;
-        const int QueueSizeCap = 300_000;
+        const int VisitBudget = 2_000_000;
+        const int QueueSizeCap = 600_000;
         var bfsSw = System.Diagnostics.Stopwatch.StartNew();
         int lastReportedCount = 0;
 
@@ -3425,7 +3652,8 @@ public sealed partial class DeepEditEngine
                     }
 
                     // (3) Dict<Type,*>: remove entries with stripped-mod Type keys.
-                    if (val is System.Collections.IDictionary dictVal)
+                    // Handle both standard IDictionary and Mafi's custom Dict<T,V>
+                    // (which does NOT implement IDictionary).
                     {
                         var vt = val.GetType();
                         if (vt.IsGenericType)
@@ -3433,7 +3661,11 @@ public sealed partial class DeepEditEngine
                             var ga = vt.GetGenericArguments();
                             if (ga.Length == 2 && typeof(Type).IsAssignableFrom(ga[0]))
                             {
-                                int dropped = RemoveStrippedTypeKeys(dictVal, stripAssemblies);
+                                int dropped;
+                                if (val is System.Collections.IDictionary dictVal)
+                                    dropped = RemoveStrippedTypeKeys(dictVal, stripAssemblies);
+                                else
+                                    dropped = RemoveStrippedTypeKeysMafi(val, vt, ga[0], stripAssemblies);
                                 if (dropped > 0)
                                 {
                                     dictTypeEntriesDropped += dropped;
@@ -3576,6 +3808,51 @@ public sealed partial class DeepEditEngine
             try { dict.Remove(k); } catch { }
         }
         return toRemove.Count;
+    }
+
+    /// <summary>
+    /// Removes stripped-mod Type keys from Mafi's custom Dict&lt;Type,V&gt; which does NOT
+    /// implement System.Collections.IDictionary. Uses reflection to enumerate keys and
+    /// call Remove(Type) for each stripped-mod entry. Handles both mutable Dict and
+    /// read-only wrappers by silently swallowing Remove exceptions.
+    /// </summary>
+    private static int RemoveStrippedTypeKeysMafi(object dict, Type dictType, Type keyType, HashSet<string> stripAssemblies)
+    {
+        // Collect keys to remove by iterating via IEnumerable<KeyValuePair<TKey,TVal>>.
+        // Mafi's Dict<T,V> implements IEnumerable<KeyValuePair<T,V>>.
+        var toRemove = new List<Type>();
+        try
+        {
+            if (dict is System.Collections.IEnumerable enumerable)
+            {
+                foreach (var item in enumerable)
+                {
+                    if (item is null) continue;
+                    var itemType = item.GetType();
+                    // KeyValuePair<Type, TValue> — get .Key
+                    var kProp = itemType.GetProperty("Key", BindingFlags.Public | BindingFlags.Instance);
+                    if (kProp?.GetValue(item) is Type k && ShouldStrip(k, stripAssemblies))
+                        toRemove.Add(k);
+                }
+            }
+        }
+        catch { return 0; }
+
+        if (toRemove.Count == 0) return 0;
+
+        // Call dict.Remove(Type) for each key to drop.
+        var miRemove = dictType.GetMethod("Remove",
+            BindingFlags.Public | BindingFlags.Instance,
+            null, new[] { keyType }, null);
+        if (miRemove is null) return 0;
+
+        int removed = 0;
+        foreach (var k in toRemove)
+        {
+            try { miRemove.Invoke(dict, new object[] { k }); removed++; }
+            catch { }
+        }
+        return removed;
     }
 
     /// <summary>
