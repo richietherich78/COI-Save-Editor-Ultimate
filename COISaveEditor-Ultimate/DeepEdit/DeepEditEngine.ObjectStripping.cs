@@ -3351,10 +3351,11 @@ public sealed partial class DeepEditEngine
                     if (typeArgs.Length < 2) continue;
                     var keyType = typeArgs[0];
 
-                    // Only care about reference-type keys that are NOT protos.
-                    // Proto-keyed dicts are handled by StripPhantomProtoRefsFromCollections.
+                    // Skip dicts whose key is a value type — those can never be mod types.
+                    // We intentionally do NOT skip proto-keyed dicts: the VALUES may still be
+                    // stripped mod entities (e.g. Dict<ProductProto, IVirtualBufferProvider>
+                    // where the value is a mod entity implementing that interface).
                     if (keyType.IsValueType) continue;
-                    if (tProto != null && tProto.IsAssignableFrom(keyType)) continue;
 
                     object? dictVal;
                     try { dictVal = fi.GetValue(obj); }
@@ -3403,16 +3404,30 @@ public sealed partial class DeepEditEngine
                     {
                         var entryType  = entries.GetType().GetElementType();
                         if (entryType is null) continue;
-                        var fiHashCode = entryType.GetField("HashCode",
+                        var fiHashCode   = entryType.GetField("HashCode",
                             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                        var fiEntryKey = entryType.GetField("Key",
+                        var fiEntryKey   = entryType.GetField("Key",
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        var fiEntryValue = entryType.GetField("Value",
                             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                         if (fiHashCode is null || fiEntryKey is null) continue;
+
+                        bool EntryIsStripped(object entry)
+                        {
+                            var k = fiEntryKey.GetValue(entry);
+                            if (k is not null && ShouldStrip(k.GetType(), stripAssemblies)) return true;
+                            if (fiEntryValue is not null)
+                            {
+                                var v = fiEntryValue.GetValue(entry);
+                                if (v is not null && ShouldStrip(v.GetType(), stripAssemblies)) return true;
+                            }
+                            return false;
+                        }
 
                         if (bucketsBuilt)
                         {
                             // ── State A: dict is fully initialized — call Remove(key). ──────
-                            var strippedKeys = new List<object>();
+                            var keysToRemove = new List<object>();
                             for (int ei = 0; ei < iterLimit; ei++)
                             {
                                 var entry = entries.GetValue(ei);
@@ -3421,25 +3436,25 @@ public sealed partial class DeepEditEngine
                                 if (hc < 0) continue; // deleted/empty slot
                                 var key = fiEntryKey.GetValue(entry);
                                 if (key is null) continue;
-                                if (ShouldStrip(key.GetType(), stripAssemblies))
-                                    strippedKeys.Add(key);
+                                if (EntryIsStripped(entry))
+                                    keysToRemove.Add(key);
                             }
-                            if (strippedKeys.Count == 0) continue;
+                            if (keysToRemove.Count == 0) continue;
 
                             var removeMethod = dictType.GetMethod("Remove", new[] { keyType });
                             if (removeMethod is null) continue;
 
                             dictsScanned++;
                             int removedFromThis = 0;
-                            foreach (var key in strippedKeys)
+                            foreach (var key in keysToRemove)
                             {
                                 try { removeMethod.Invoke(dictVal, new[] { key }); removedFromThis++; }
                                 catch { }
                             }
                             totalRemoved += removedFromThis;
                             progress?.Report(
-                                $"  [dict-key-scrub] {objType.Name}.{fi.Name}: " +
-                                $"removed {removedFromThis}/{strippedKeys.Count} stripped-entity key(s).");
+                                $"  [dict-scrub] {objType.Name}.{fi.Name}: " +
+                                $"removed {removedFromThis}/{keysToRemove.Count} stripped entry/entries.");
                         }
                         else
                         {
@@ -3447,14 +3462,13 @@ public sealed partial class DeepEditEngine
                             // m_entries is the raw deserialized array; all entries are live.
                             // Remove by rebuilding m_entries WITHOUT the stripped entries.
                             // The game's own initAfterLoad (on save load) will re-index from
-                            // the compacted array, so no stripped keys end up in the final dict.
+                            // the compacted array, so no stripped entries end up in the final dict.
                             int strippedCount = 0;
                             var keptEntries = new System.Collections.ArrayList(iterLimit);
                             for (int ei = 0; ei < iterLimit; ei++)
                             {
                                 var entry = entries.GetValue(ei);
-                                var key   = entry is null ? null : fiEntryKey.GetValue(entry);
-                                if (key is not null && ShouldStrip(key.GetType(), stripAssemblies))
+                                if (entry is not null && EntryIsStripped(entry))
                                 {
                                     strippedCount++;
                                 }
@@ -3475,8 +3489,8 @@ public sealed partial class DeepEditEngine
                             dictsScanned++;
                             totalRemoved += strippedCount;
                             progress?.Report(
-                                $"  [dict-key-scrub] {objType.Name}.{fi.Name}: " +
-                                $"removed {strippedCount} stripped-entity key(s) (pre-init compaction, {keptEntries.Count} kept).");
+                                $"  [dict-scrub] {objType.Name}.{fi.Name}: " +
+                                $"removed {strippedCount} stripped entry/entries (pre-init compaction, {keptEntries.Count} kept).");
                         }
                     }
                     catch { continue; }
@@ -3484,7 +3498,7 @@ public sealed partial class DeepEditEngine
             }
         }
 
-        progress?.Report($"  [dict-key-scrub] Done: {totalRemoved} key(s) removed across {dictsScanned} dict field(s).");
+        progress?.Report($"  [dict-scrub] Done: {totalRemoved} entry/entries removed across {dictsScanned} dict field(s).");
     }
 
     /// <summary>
