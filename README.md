@@ -18,7 +18,7 @@ Save editing is inherently risky. If something goes wrong, a corrupted save may 
 
 Save files are typically found at:
 ```
-%APPDATA%\..\LocalLow\MaFi Games\Captain of Industry\Saves
+%APPDATA%\..\Roaming\Captain of Industry\Saves
 ```
 
 ---
