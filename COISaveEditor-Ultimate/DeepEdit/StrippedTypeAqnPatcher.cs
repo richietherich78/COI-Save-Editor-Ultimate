@@ -133,14 +133,16 @@ internal static class StrippedTypeAqnPatcher
             // The needle MUST lie inside this body, otherwise this isn't our string.
             if (needleHit < candidateBodyStart || needleHit + 1 > bodyEnd) continue;
 
-            // BOUNDARY CHECK: the byte right before the prefix must NOT be a printable
-            // ASCII character. If it is, we're sitting mid-string in some larger AQN
-            // and this "prefix" is just a coincidental low-byte of that AQN's body.
-            if (prefixStart > 0)
-            {
-                byte before = payload[prefixStart - 1];
-                if (before >= 0x20 && before <= 0x7E) continue;
-            }
+            // Note: we intentionally do NOT require the byte before the prefix to be
+            // non-printable. When two AQN strings are written back-to-back (e.g. in a
+            // Lyst<Type> or sequence of EventBase CallbackSaveData entries), the byte
+            // immediately before the second string's length prefix is the last byte of
+            // the first string's body — which IS printable ASCII. Requiring a non-printable
+            // boundary here would cause a false-negative skip for the second and later AQNs
+            // in any such run. Safety against false positives is provided by:
+            //  (a) the after-body check (byte after body must be non-printable), and
+            //  (b) the fact that removed-mod AQN needles like ", COIExtended.Core, Version="
+            //      cannot appear as a substring of a vanilla (non-mod) type's AQN.
 
             // Body must be entirely printable ASCII (typical AQN content).
             bool allPrintable = true;
@@ -151,21 +153,15 @@ internal static class StrippedTypeAqnPatcher
             }
             if (!allPrintable) continue;
 
-            // BOUNDARY CHECK: the byte right after the body must also not be printable
-            // ASCII (otherwise we're truncating a longer string mid-way). The very next
-            // byte in the stream after a Mafi string is some framing token (often a
-            // small integer or another length prefix), almost never another AQN byte.
-            if (bodyEnd < payload.Length)
-            {
-                byte after = payload[bodyEnd];
-                if (after >= 0x20 && after <= 0x7E)
-                {
-                    // Allow if the post-body byte is a non-AQN-typical printable
-                    // (e.g. '\0' is non-printable). For safety, only accept if next
-                    // byte is clearly framing (high bit set, or low control byte).
-                    continue;
-                }
-            }
+            // Note: we also do NOT require the byte after the body to be non-printable.
+            // When a Type AQN is followed immediately by another string (e.g. a Proto.ID
+            // value in a Dict<Type, Proto.ID>), the byte after the body is the length prefix
+            // of that next string. For strings 32–126 bytes long, this prefix byte is
+            // 0x20–0x7E (printable ASCII), which would cause a false-negative skip.
+            // The all-printable-body check (above) is the real guard against false positives:
+            // FishFarmProto's 2-byte length prefix (0x87 0x01) means any false candidate
+            // that tries to start BEFORE the real body will encounter 0x87 and fail
+            // allPrintable, so the earliest-first iteration always lands on the real body.
 
             // Found the real start of the AQN. Overwrite in place.
             originalAqn = Encoding.ASCII.GetString(payload, candidateBodyStart, decodedLen);

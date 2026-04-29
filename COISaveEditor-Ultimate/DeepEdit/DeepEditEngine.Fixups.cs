@@ -59,34 +59,80 @@ public sealed partial class DeepEditEngine
     /// <summary>
     /// Fix up objects whose Phase 3 (InitAfterLoad) couldn't fully complete.
     /// </summary>
-    private void PrepareObjectsForReserialization(object resolver, IProgress<string>? progress)
+    private void PrepareObjectsForReserialization(object resolver, object reader, IProgress<string>? progress)
     {
         var resolverType = resolver.GetType();
-        var fiResolved = FindFieldDeep(resolverType, "m_resolvedObjects");
-        if (fiResolved is null) return;
 
-        var resolved = fiResolved.GetValue(resolver) as System.Collections.IEnumerable;
-        if (resolved is null) return;
+        // DependencyResolver.Serialize writes from THREE collections:
+        //   m_resolvedObjects, m_resolvedInstancesByRealType.Values,
+        //   m_resolvedInstancesByRegisteredType.Values
+        // We must cover all three so every queued object is pre-fixed.
+        // Use a reference-equality set to avoid processing duplicates.
+        var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        var allSources = new List<System.Collections.IEnumerable?>();
+        allSources.Add(FindFieldDeep(resolverType, "m_resolvedObjects")?.GetValue(resolver) as System.Collections.IEnumerable);
 
-        var tTerrainManager = AssemblyLoader.FindType("Mafi.Core.Terrain.TerrainManager");
-        var tUnlockedProtosDb = AssemblyLoader.FindType("Mafi.Core.Prototypes.UnlockedProtosDb");
+        var fiByReal = FindFieldDeep(resolverType, "m_resolvedInstancesByRealType");
+        var dictByReal = fiByReal?.GetValue(resolver);
+        if (dictByReal is not null)
+        {
+            var miValues = dictByReal.GetType().GetProperty("Values",
+                BindingFlags.Public | BindingFlags.Instance);
+            allSources.Add(miValues?.GetValue(dictByReal) as System.Collections.IEnumerable);
+        }
+
+        var fiByReg = FindFieldDeep(resolverType, "m_resolvedInstancesByRegisteredType");
+        var dictByReg = fiByReg?.GetValue(resolver);
+        if (dictByReg is not null)
+        {
+            var miValues = dictByReg.GetType().GetProperty("Values",
+                BindingFlags.Public | BindingFlags.Instance);
+            allSources.Add(miValues?.GetValue(dictByReg) as System.Collections.IEnumerable);
+        }
+
+        var tTerrainManager          = AssemblyLoader.FindType("Mafi.Core.Terrain.TerrainManager");
+        var tUnlockedProtosDb        = AssemblyLoader.FindType("Mafi.Core.Prototypes.UnlockedProtosDb");
+        var tClearancePathability    = AssemblyLoader.FindType("Mafi.Core.PathFinding.ClearancePathabilityProvider");
+        var tModJsonConfig           = AssemblyLoader.FindType("Mafi.Core.Mods.ModJsonConfig");
 
         if (tTerrainManager is null)
             progress?.Report("    Could not locate TerrainManager type — skipping terrain fixup.");
         if (tUnlockedProtosDb is null)
             progress?.Report("    Could not locate UnlockedProtosDb type — skipping unlock fixup.");
+        if (tClearancePathability is null)
+            progress?.Report("    Could not locate ClearancePathabilityProvider — skipping pathfinding fixup.");
+        if (tModJsonConfig is null)
+            progress?.Report("    Could not locate ModJsonConfig — skipping config fixup.");
 
-        foreach (var obj in resolved)
+        foreach (var source in allSources)
         {
-            if (obj is null) continue;
-            var objType = obj.GetType();
+            if (source is null) continue;
+            foreach (var obj in source)
+            {
+                if (obj is null || !visited.Add(obj)) continue;
+                var objType = obj.GetType();
 
-            if (tTerrainManager is not null && objType == tTerrainManager)
-                ReconstitutTerrainDataArrays(obj, progress);
+                if (tTerrainManager is not null && objType == tTerrainManager)
+                    ReconstitutTerrainDataArrays(obj, progress);
 
-            if (tUnlockedProtosDb is not null && tUnlockedProtosDb.IsAssignableFrom(objType))
-                RunUnlockedProtosDbInitAfterLoad(obj, progress);
+                if (tUnlockedProtosDb is not null && tUnlockedProtosDb.IsAssignableFrom(objType))
+                    RunUnlockedProtosDbInitAfterLoad(obj, progress);
+
+                if (tClearancePathability is not null && tClearancePathability.IsAssignableFrom(objType))
+                    InitClearancePathabilityProviderData(obj, progress);
+
+                if (tModJsonConfig is not null && tModJsonConfig.IsAssignableFrom(objType))
+                    InitModJsonConfigParameters(obj, progress);
+            }
         }
+
+        // Run Dict<,>.initAfterLoad for all deserialized Dict instances registered in
+        // the reader's pending-init list. Phase 3 is skipped to prevent manager-side-effect
+        // callbacks from corrupting the save, but Dict.initAfterLoad is pure bucket-setup
+        // (no manager writes). Without it, any Dict with m_entries non-null and m_buckets
+        // null will throw "Trying to enumerate a dict that was not initialized after load."
+        // during RESOLVER FinalizeSerialization.
+        RunDictInitAfterLoadCallbacks(reader, progress);
     }
 
     /// <summary>
@@ -123,6 +169,156 @@ public sealed partial class DeepEditEngine
         {
             var inner = (ex as System.Reflection.TargetInvocationException)?.InnerException ?? ex;
             progress?.Report($"    UnlockedProtosDb.initAfterLoad threw: {inner.GetType().Name}: {inner.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Runs initAfterLoad() for every Mafi.Collections type (Dict, Set, Lyst, etc.) registered
+    /// in the BlobReader's pending-init list. Phase 3 is skipped for safety, but collection
+    /// initAfterLoad is pure bucket/slot initialization — no side effects on game managers.
+    /// Without it, deserialized collections with m_entries non-null but m_buckets null throw
+    /// "not initialized after load" during RESOLVER FinalizeSerialization.
+    /// </summary>
+    private void RunDictInitAfterLoadCallbacks(object reader, IProgress<string>? progress)
+    {
+        try
+        {
+            if (_tBlobReader is null) return;
+            var fiInit = _tBlobReader.GetField("m_objsToInit",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            if (fiInit is null) return;
+
+            var initList = fiInit.GetValue(reader) as System.Collections.IEnumerable;
+            if (initList is null) return;
+
+            int dictCount = 0, dictFail = 0;
+            foreach (var initData in initList)
+            {
+                if (initData is null) continue;
+                var initType = initData.GetType();
+                var obj = initType.GetField("Obj", BindingFlags.Public | BindingFlags.Instance)?.GetValue(initData);
+                if (obj is null) continue;
+
+                // Only process Mafi.Collections types (Dict, Set, Lyst, etc.).
+                var objTypeName = obj.GetType().FullName ?? "";
+                if (!objTypeName.StartsWith("Mafi.Collections.", StringComparison.Ordinal))
+                    continue;
+
+                // Check IsInitializedAfterLoad: skip if already good.
+                var piInit = obj.GetType().GetProperty("IsInitializedAfterLoad",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (piInit?.GetValue(obj) is true)
+                    continue;
+
+                var mi = FindMethodDeep(obj.GetType(), "initAfterLoad");
+                if (mi is null) continue;
+
+                try
+                {
+                    mi.Invoke(obj, null);
+                    dictCount++;
+                }
+                catch (Exception ex)
+                {
+                    var inner = (ex as TargetInvocationException)?.InnerException ?? ex;
+                    progress?.Report($"    Dict initAfterLoad threw: {inner.GetType().Name}: {inner.Message}");
+                    dictFail++;
+                }
+            }
+
+            if (dictCount > 0 || dictFail > 0)
+                progress?.Report($"    Dict.initAfterLoad: {dictCount} initialized, {dictFail} failed.");
+        }
+        catch (Exception ex)
+        {
+            progress?.Report($"    RunDictInitAfterLoadCallbacks error: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// ModJsonConfig.m_parameters is a readonly field set by the constructor and mod-loading init,
+    /// never by DeserializeData. Without initAfterLoad (Phase 3 skipped), it stays null and
+    /// SerializeData throws NRE at writer.WriteInt(m_parameters.Count). We initialize it to an
+    /// empty dict so serialization succeeds; config values are stored in the CONFIGS chunk anyway.
+    /// </summary>
+    private static void InitModJsonConfigParameters(object modJsonConfig, IProgress<string>? progress)
+    {
+        try
+        {
+            var modIdProp = modJsonConfig.GetType().GetProperty("ModId",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            string modId = modIdProp?.GetValue(modJsonConfig) as string ?? "<unknown>";
+
+            var fi = FindFieldDeep(modJsonConfig.GetType(), "m_parameters");
+            if (fi is null)
+            {
+                progress?.Report($"    ModJsonConfig({modId}): m_parameters field not found.");
+                return;
+            }
+
+            var current = fi.GetValue(modJsonConfig);
+            if (current is not null)
+            {
+                // Already set — check for null issues via a dry-run property access.
+                int count = -1;
+                try { count = (int)current.GetType().GetProperty("Count")!.GetValue(current)!; } catch { }
+                progress?.Report($"    ModJsonConfig({modId}): m_parameters already set (Count={count}).");
+                return;
+            }
+
+            var emptyDict = Activator.CreateInstance(fi.FieldType);
+            fi.SetValue(modJsonConfig, emptyDict);
+            progress?.Report($"    ModJsonConfig({modId}): m_parameters initialized (empty).");
+        }
+        catch (Exception ex)
+        {
+            var inner = (ex as System.Reflection.TargetInvocationException)?.InnerException ?? ex;
+            progress?.Report($"    ModJsonConfig init threw: {inner.GetType().Name}: {inner.Message}");
+        }
+    }
+
+    /// <summary>
+    /// ClearancePathabilityProvider.m_data is set by initSelfVeryHigh (Phase 3 Highest), which
+    /// we skip. Without it, the m_initializedChunks getter throws ArgumentNullException during
+    /// RESOLVER re-serialization. We initialize m_data to an empty array so the getter can run.
+    /// The game recomputes pathfinding chunk data from scratch on load anyway.
+    /// </summary>
+    private static void InitClearancePathabilityProviderData(object provider, IProgress<string>? progress)
+    {
+        try
+        {
+            var fiData = FindFieldDeep(provider.GetType(), "m_data");
+            if (fiData is null)
+            {
+                progress?.Report("    WARN: m_data not found on ClearancePathabilityProvider.");
+                return;
+            }
+
+            if (fiData.GetValue(provider) is not null)
+                return; // already initialized
+
+            // Read Chunk8TotalCount from the TerrainManager reference held by this provider.
+            var piTerrain = provider.GetType().GetProperty("TerrainManager",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            object? tm = piTerrain?.GetValue(provider);
+            int chunkCount = 0;
+            if (tm is not null)
+            {
+                var piCount = tm.GetType().GetProperty("Chunk8TotalCount",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                chunkCount = piCount?.GetValue(tm) is int c ? c : 0;
+            }
+
+            // Create Option<DataChunk>[] of the right length (all entries default to None).
+            var elementType = fiData.FieldType.GetElementType()!;
+            var emptyArray = Array.CreateInstance(elementType, chunkCount);
+            fiData.SetValue(provider, emptyArray);
+            progress?.Report($"    ClearancePathabilityProvider.m_data initialized (length={chunkCount}).");
+        }
+        catch (Exception ex)
+        {
+            var inner = (ex as System.Reflection.TargetInvocationException)?.InnerException ?? ex;
+            progress?.Report($"    ClearancePathabilityProvider init threw: {inner.GetType().Name}: {inner.Message}");
         }
     }
 
@@ -355,11 +551,139 @@ public sealed partial class DeepEditEngine
     }
 
     /// <summary>
+    /// Scans all SlimIdManagers in the resolver and records which phantom stubs live in their
+    /// ManagedProtos arrays into <see cref="_stubsInSlimIdManagers"/>.
+    /// Must be called after AuditPhantomProtoRefs (so stubs are still identifiable) and before
+    /// NullifyPhantomProtoIds (which uses the collected set to skip ID hijacking).
+    /// <para/>
+    /// Rationale: SlimIdManagerBase.initAfterLoad checks each saved ManagedProtos entry against
+    /// vanilla ProtosDb.  If we hijack "AlnicoIngot" → "IronOre", the game resolves that slot to
+    /// the real IronOre proto and removes it from the vanilla set.  When initAfterLoad later
+    /// reaches the real IronOre position it is already gone → "Missing proto detected" → replaced
+    /// with PhantomProto → IronOre gets a brand-new appended SlimId → ProductStats[oldSlimId]
+    /// mismatch → "Products changed after load" → all vanilla storage stats show 0.
+    /// Keeping the original COIExtended ID ("AlnicoIngot") causes the game's ReadWeakProtoRef to
+    /// produce PhantomProto for that unknown ID; initAfterLoad then skips phantom slots, leaving
+    /// every vanilla proto at its correct SlimId position and preserving ProductStats.
+    /// </summary>
+    private void CollectSlimIdManagerStubs(object resolver, IProgress<string>? progress = null)
+    {
+        if (_phantomProtoStubs is null || _phantomProtoStubs.Count == 0) return;
+
+        _stubsInSlimIdManagers = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        _slimIdProtectedProtoIdStrings = new HashSet<string>(StringComparer.Ordinal);
+
+        // Needed to extract proto ID strings for _slimIdProtectedProtoIdStrings.
+        var tProtoForIds = AssemblyLoader.FindType("Mafi.Core.Prototypes.Proto");
+        var fiProtoIdForIds = tProtoForIds?.GetField("<Id>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        const BindingFlags allInst = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+        // Phase A: collect SlimIdManager instances.
+        // Critical: SlimIdManagers are NOT top-level resolver objects — they are FIELDS on
+        // manager classes (e.g. ProductsManager.<SlimIdManager>k__BackingField).
+        // CollectAllResolverObjects returns only the top-level objects, so we scan one level
+        // deeper: for each resolver object, check all its fields whose DECLARED TYPE contains
+        // "SlimIdManager" in the name.
+        var slimManagers = new List<object>();
+        var allObjects = CollectAllResolverObjects(resolver);
+        foreach (var obj in allObjects)
+        {
+            if (obj is null) continue;
+            // Check if the object IS a SlimIdManager (belt-and-braces; unlikely top-level).
+            if (obj.GetType().Name.Contains("SlimIdManager"))
+            {
+                slimManagers.Add(obj);
+                continue;
+            }
+            // Scan declared fields for SlimIdManager-typed values.
+            for (var t = obj.GetType(); t is not null && t != typeof(object); t = t.BaseType)
+            {
+                foreach (var fi in t.GetFields(allInst | BindingFlags.DeclaredOnly))
+                {
+                    if (!fi.FieldType.Name.Contains("SlimIdManager")) continue;
+                    try
+                    {
+                        var val = fi.GetValue(obj);
+                        if (val is not null) slimManagers.Add(val);
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        if (slimManagers.Count == 0)
+        {
+            progress?.Report("  WARNING: No SlimIdManagers found in resolver — storage-stats fix cannot proceed.");
+            return;
+        }
+
+        // Phase B: for each SlimIdManager enumerate ManagedProtos.
+        // ManagedProtos is ImmutableArray<TProto> — a STRUCT that does not implement
+        // IEnumerable but exposes a struct-based GetEnumerator().  Reuse AuditTryEnumerate
+        // (same logic as the AUDIT pass) which calls GetEnumerator/MoveNext/Current via
+        // reflection — this avoids depending on the backing field name (which the decompiler
+        // shows as "m_items" but may be obfuscated in the compiled DLL).
+        int stubsFound = 0;
+        foreach (var slimMgr in slimManagers)
+        {
+            var fiManaged = FindFieldDeep(slimMgr.GetType(), "ManagedProtos");
+            if (fiManaged is null) continue;
+
+            try
+            {
+                var boxedImmArr = fiManaged.GetValue(slimMgr);
+                if (boxedImmArr is null) continue;
+
+                // AuditTryEnumerate handles both IEnumerable and struct-based GetEnumerator().
+                var items = AuditTryEnumerate(boxedImmArr);
+                if (items is null) continue;
+
+                foreach (var item in items)
+                {
+                    if (item is not null && _phantomProtoStubs.Contains(item))
+                    {
+                        _stubsInSlimIdManagers.Add(item);
+                        stubsFound++;
+
+                        // Record proto ID string so NullifyPhantomProtoIds can also protect "sibling"
+                        // stubs (e.g. ProductStats[i].Product) that share the same ID but are different
+                        // objects because the factory creates a fresh stub per deserialization call.
+                        if (fiProtoIdForIds is not null)
+                        {
+                            try
+                            {
+                                var idObj = fiProtoIdForIds.GetValue(item);
+                                if (idObj is not null)
+                                {
+                                    var vp = idObj.GetType().GetProperty("Value", BindingFlags.Public | BindingFlags.Instance);
+                                    var idStr = (vp?.GetValue(idObj) as string) ?? idObj.ToString();
+                                    if (!string.IsNullOrEmpty(idStr))
+                                        _slimIdProtectedProtoIdStrings.Add(idStr);
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        var typeNames = slimManagers.Select(m => m.GetType().Name).Distinct().Take(8);
+        progress?.Report($"  SlimIdManagers found: {slimManagers.Count} ({string.Join(", ", typeNames)}), phantom stubs in ManagedProtos: {stubsFound}.");
+    }
+
+    /// <summary>
     /// Adjusts phantom proto IDs before re-serialisation.
     /// Core game protos (Mafi.Core, Mafi.Base, Mafi.TrainsDlc) keep their original save-file IDs
     /// so the game's own ProtosDb can resolve them on load.
     /// Protos from removed mods get unique placeholder IDs to avoid duplicate-key exceptions
     /// in the game's SlimIdManager.
+    /// Stubs that live inside SlimIdManager.ManagedProtos arrays are intentionally left with their
+    /// original mod IDs — the game's ReadWeakProtoRef will produce PhantomProto for unknown IDs,
+    /// and initAfterLoad skips phantom entries, keeping vanilla protos at their correct SlimId
+    /// positions and preserving all saved ProductStats.
     /// </summary>
     private void NullifyPhantomProtoIds(IProgress<string>? progress)
     {
@@ -368,6 +692,12 @@ public sealed partial class DeepEditEngine
             progress?.Report("  No phantom proto stubs to clean.");
             return;
         }
+
+        // _stubsInSlimIdManagers was populated by CollectSlimIdManagerStubs (called after AuditPhantomProtoRefs).
+        // These stubs must NOT be hijacked — see CollectSlimIdManagerStubs for the full rationale.
+        var stubsInManagedProtos = _stubsInSlimIdManagers ?? new HashSet<object>(ReferenceEqualityComparer.Instance);
+        progress?.Report($"  SlimIdManager stubs excluded from hijacking: {stubsInManagedProtos.Count} " +
+            $"(keep original COIExtended IDs — game's ReadWeakProtoRef returns PhantomProto for unknown IDs).");
 
         var tProto = AssemblyLoader.FindType("Mafi.Core.Prototypes.Proto");
         var fiProtoId = tProto?.GetField("<Id>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -391,10 +721,20 @@ public sealed partial class DeepEditEngine
         int hijackedToVanilla = 0;
         int phantomIndex = 0;
 
+        int skippedInManagedProtos = 0;
         foreach (var stub in _phantomProtoStubs)
         {
             try
             {
+                // Stubs in SlimIdManager.ManagedProtos must keep their original mod IDs.
+                // The game's ReadWeakProtoRef returns PhantomProto for unknown IDs; initAfterLoad
+                // then skips phantom slots, preserving vanilla protos at their correct positions.
+                if (stubsInManagedProtos.Contains(stub))
+                {
+                    skippedInManagedProtos++;
+                    continue;
+                }
+
                 string? originalId = null;
                 var idObj = fiProtoId.GetValue(stub);
                 if (idObj is not null)
@@ -402,6 +742,20 @@ public sealed partial class DeepEditEngine
                     // Proto.ID has a ToString() or Value property that gives the string ID.
                     var valueProp = idObj.GetType().GetProperty("Value", BindingFlags.Public | BindingFlags.Instance);
                     originalId = (valueProp?.GetValue(idObj) as string) ?? idObj.ToString();
+                }
+
+                // Also protect stubs whose ID string matches a ManagedProtos stub ID.
+                // The factory creates a DIFFERENT stub object for each field that holds the same proto
+                // (e.g. ManagedProtos[i] and ProductStats[i].Product both read "AlnicoIngot" but get
+                // separate stub objects).  The reference check above misses the ProductStats sibling;
+                // the ID-string check catches it so both stay at the original mod ID → both become
+                // PhantomProto on game load → SlimId-indexed arrays stay aligned.
+                if (_slimIdProtectedProtoIdStrings is not null
+                    && !string.IsNullOrEmpty(originalId)
+                    && _slimIdProtectedProtoIdStrings.Contains(originalId!))
+                {
+                    skippedInManagedProtos++;
+                    continue;
                 }
 
                 bool isGameProto = IsGameAssemblyType(stub.GetType(), gameAssemblyPrefixes);
@@ -452,7 +806,7 @@ public sealed partial class DeepEditEngine
             }
             catch { }
         }
-        progress?.Report($"  Phantom proto IDs: {keptOriginal} kept original, {hijackedToVanilla} hijacked to a vanilla proto ID of the same type, {reassigned} assigned placeholder IDs (these will crash the game if referenced).");
+        progress?.Report($"  Phantom proto IDs: {keptOriginal} kept original, {hijackedToVanilla} hijacked to a vanilla proto ID of the same type, {skippedInManagedProtos} kept with original mod IDs (in ManagedProtos — game handles via PhantomProto), {reassigned} assigned placeholder IDs (these will crash the game if referenced).");
     }
 
     /// <summary>
@@ -600,6 +954,154 @@ public sealed partial class DeepEditEngine
         if (type is null) return false;
         if (ShouldStrip(type, stripAssemblies)) return false;
         return IsGameAssemblyType(type, GameAssemblyPrefixes);
+    }
+
+    // ── Machine recipe healing ────────────────────────────────────────────
+
+    /// <summary>
+    /// After stripping phantom recipe stubs from Machine.m_recipesAssigned, machines that ran
+    /// only COIExtended-exclusive recipes (HighPressureBoiler "SuperSteam", SmokeStack COI-E
+    /// disposal recipe, etc.) are left with an empty m_recipesAssigned and no LastRecipeInProgress.
+    /// This pass finds those machines and assigns the vanilla recipes from their (now-healed)
+    /// proto.m_recipes so the machine is operable after load.
+    ///
+    /// For machines with exactly one vanilla recipe, LastRecipeInProgress is also set so the
+    /// machine restarts automatically (e.g. BoilerGas → one gas-burn recipe → resumes running).
+    /// For machines with multiple vanilla recipes (SmokeStack: 8 disposal recipes,
+    /// DistillationTower: several distillation recipes) only m_recipesAssigned is filled;
+    /// the player must select a recipe manually in-game.
+    /// </summary>
+    private void HealMachineRecipes(object resolver, IProgress<string>? progress)
+    {
+        var tRecipeProto = AssemblyLoader.FindType("Mafi.Core.Factory.Recipes.RecipeProto");
+        if (tRecipeProto is null)
+        {
+            progress?.Report("  Recipe healing: RecipeProto type not found — skipped.");
+            return;
+        }
+
+        // Locate EntitiesManager → m_entitiesLinear (same pattern as StripNullProtoEntitiesFromManagers).
+        var fiResolved = FindFieldDeep(resolver.GetType(), "m_resolvedObjects");
+        var resolved = fiResolved?.GetValue(resolver) as System.Collections.IEnumerable;
+        if (resolved is null) { progress?.Report("  Recipe healing: m_resolvedObjects not found — skipped."); return; }
+
+        var tEntitiesManager = AssemblyLoader.FindType("Mafi.Core.Entities.EntitiesManager");
+        if (tEntitiesManager is null) { progress?.Report("  Recipe healing: EntitiesManager type not found — skipped."); return; }
+
+        object? entitiesManager = null;
+        foreach (var obj in resolved)
+        {
+            if (obj is not null && tEntitiesManager.IsAssignableFrom(obj.GetType()))
+            { entitiesManager = obj; break; }
+        }
+        if (entitiesManager is null) { progress?.Report("  Recipe healing: EntitiesManager not found in resolver — skipped."); return; }
+
+        var fiLinear = FindFieldDeep(entitiesManager.GetType(), "m_entitiesLinear");
+        var entitiesLinear = fiLinear?.GetValue(entitiesManager);
+        if (entitiesLinear is null) { progress?.Report("  Recipe healing: m_entitiesLinear not found — skipped."); return; }
+
+        const BindingFlags allFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+        // Per-type FieldInfo cache so we do GetField only once per concrete type.
+        var fiRecipesAssignedCache = new Dictionary<Type, FieldInfo?>();
+        var fiLastRecipeCache       = new Dictionary<Type, FieldInfo?>();
+        var fiProtoCache            = new Dictionary<Type, FieldInfo?>();
+        var fiMachineRecipesCache   = new Dictionary<Type, FieldInfo?>();
+
+        int healed = 0, alsoRestored = 0, skipped = 0;
+
+        foreach (var entity in (System.Collections.IEnumerable)entitiesLinear)
+        {
+            if (entity is null) continue;
+            var entityType = entity.GetType();
+
+            // Check for m_recipesAssigned field (only Machine-family entities have it).
+            if (!fiRecipesAssignedCache.TryGetValue(entityType, out var fiRA))
+                fiRecipesAssignedCache[entityType] = fiRA = FindFieldDeep(entityType, "m_recipesAssigned");
+            if (fiRA is null) continue;
+
+            // Only process if list is non-null and empty (phantom recipes were stripped).
+            object? recipesAssigned;
+            try { recipesAssigned = fiRA.GetValue(entity); } catch { continue; }
+            if (recipesAssigned is null) continue;
+            var countProp = recipesAssigned.GetType().GetProperty("Count", allFlags);
+            int assignedCount = countProp?.GetValue(recipesAssigned) is int ac ? ac : -1;
+            if (assignedCount != 0) continue;
+
+            // Read the machine's healed proto.
+            if (!fiProtoCache.TryGetValue(entityType, out var fiProto))
+                fiProtoCache[entityType] = fiProto = FindFieldDeep(entityType, "m_proto");
+            if (fiProto is null) { skipped++; continue; }
+
+            object? proto;
+            try { proto = fiProto.GetValue(entity); } catch { skipped++; continue; }
+            if (proto is null) { skipped++; continue; }
+            var protoType = proto.GetType();
+
+            // Read vanilla proto's m_recipes (Lyst<RecipeProto>).
+            if (!fiMachineRecipesCache.TryGetValue(protoType, out var fiMR))
+                fiMachineRecipesCache[protoType] = fiMR = FindFieldDeep(protoType, "m_recipes");
+            if (fiMR is null) { skipped++; continue; }
+
+            object? protoRecipes;
+            try { protoRecipes = fiMR.GetValue(proto); } catch { skipped++; continue; }
+            if (protoRecipes is null) { skipped++; continue; }
+
+            // Collect the actual recipe objects.
+            var recipeList = new List<object>();
+            try
+            {
+                foreach (var r in (System.Collections.IEnumerable)protoRecipes)
+                    if (r is not null && tRecipeProto.IsAssignableFrom(r.GetType()))
+                        recipeList.Add(r);
+            }
+            catch { skipped++; continue; }
+
+            if (recipeList.Count == 0) { skipped++; continue; }
+
+            // Find Lyst<RecipeProto>.Add(RecipeProto) — the non-generic Add taking a ref type.
+            var addMethod = recipesAssigned.GetType().GetMethods(allFlags)
+                .FirstOrDefault(m => m.Name == "Add"
+                    && m.GetParameters().Length == 1
+                    && !m.IsGenericMethodDefinition
+                    && !m.GetParameters()[0].ParameterType.IsValueType);
+            if (addMethod is null) { skipped++; continue; }
+
+            bool anyAdded = false;
+            foreach (var recipe in recipeList)
+            {
+                try { addMethod.Invoke(recipesAssigned, new[] { recipe }); anyAdded = true; }
+                catch { }
+            }
+            if (!anyAdded) { skipped++; continue; }
+
+            healed++;
+            if (healed <= 30)
+                progress?.Report($"    Recipe heal: {entityType.Name}.m_recipesAssigned ← {recipeList.Count} recipe(s) from {protoType.Name}");
+
+            // For machines with exactly one vanilla recipe, also restore LastRecipeInProgress
+            // so the machine auto-resumes (e.g. BoilerGas has 1 recipe → starts immediately).
+            if (recipeList.Count != 1) continue;
+
+            if (!fiLastRecipeCache.TryGetValue(entityType, out var fiLR))
+                fiLastRecipeCache[entityType] = fiLR = FindFieldDeep(entityType, "LastRecipeInProgress");
+            if (fiLR is null) continue;
+
+            try
+            {
+                // LastRecipeInProgress is Option<RecipeProto> — create Some(recipe).
+                var someVal = MakeOptionSome(tRecipeProto, recipeList[0]);
+                fiLR.SetValue(entity, someVal);
+                alsoRestored++;
+                if (alsoRestored <= 10)
+                    progress?.Report($"      → also restored LastRecipeInProgress for single-recipe {entityType.Name}");
+            }
+            catch { }
+        }
+
+        progress?.Report($"  Recipe healing: {healed} machines assigned vanilla recipes" +
+            (alsoRestored > 0 ? $" ({alsoRestored} also had LastRecipeInProgress restored)" : "") +
+            $", {skipped} skipped (no applicable proto recipes).");
     }
 
     // ── Option helpers ────────────────────────────────────────────────────

@@ -8,8 +8,8 @@ namespace COISaveEditorUltimate;
 /// </summary>
 public sealed class AppSettings
 {
-    private static readonly string SettingsPath = Path.Combine(
-        AppContext.BaseDirectory, "COISaveEditor.settings.json");
+    private static readonly string SettingsPath =
+        @"G:\COI Mods\COIUltimateSaveEditor - Config File save\COISaveEditor.settings.json";
 
     // ── Properties ────────────────────────────────────────────────────────
 

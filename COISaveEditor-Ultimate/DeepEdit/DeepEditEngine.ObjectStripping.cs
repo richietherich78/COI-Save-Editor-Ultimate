@@ -11,15 +11,8 @@ public sealed partial class DeepEditEngine
     /// name matches an assembly belonging to a removed mod.
     /// </summary>
     private (int removed, List<string> types) StripRemovedModObjects(
-        object resolver, ISet<string> modsToRemove, IProgress<string>? progress)
+        object resolver, HashSet<string> stripAssemblies, IProgress<string>? progress)
     {
-        var stripAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var id in modsToRemove)
-        {
-            stripAssemblies.Add(id.Replace('-', '.'));
-            stripAssemblies.Add(id);
-        }
-
         int removed = 0;
         var removedTypes = new List<string>();
 
@@ -1459,8 +1452,8 @@ public sealed partial class DeepEditEngine
         int totalRemoved = 0;
         int verboseReportBudget = 500; // cap individual removal lines to avoid log explosion on large saves
         int bfsVisits = 0;
-        const int BfsVisitBudget  = 1_000_000;
-        const int BfsQueueSizeCap =   500_000;
+        const int BfsVisitBudget  = 5_000_000;
+        const int BfsQueueSizeCap = 2_000_000;
 
         // BFS: start with resolver objects, discover nested objects through collection fields.
         // This finds entities like LogisticsZone held in manager collections, not EntitiesManager.
@@ -1835,7 +1828,10 @@ public sealed partial class DeepEditEngine
                             // ProductsManager.ProductStats is indexed by slim ID (same index as ManagedProtos).
                             // Removing phantom entries would shift indices and cause "Products changed after load"
                             // errors when the game's initAfterLoad compares ProductStats[i] with ManagedProtos[i].
-                            if (fi.Name == "ProductStats" && objType.Name == "ProductsManager")
+                            // ProductStats is an auto-property; its IL backing field is "<ProductStats>k__BackingField".
+                            bool isProductStatsField = fi.Name == "ProductStats"
+                                || fi.Name == "<ProductStats>k__BackingField";
+                            if (isProductStatsField && objType.Name == "ProductsManager")
                                 continue;
 
                             // ImmutableArray: rebuild without phantom items.
@@ -2855,6 +2851,273 @@ public sealed partial class DeepEditEngine
     // Performance: bounded by VisitBudget (200K objects) and ReferenceEqualityComparer
     // visit set. On a 175K-entity save the BFS visits ~600K objects in ~3 seconds.
 
+    // ── Phantom-stub → vanilla-proto replacement ──────────────────────────────
+    //
+    // COIExtended replaced vanilla product, machine, and other proto types with its
+    // own subclass instances (e.g. COIExtended.ModProductProto for "Product_Iron").
+    // During deserialization these become phantom stubs (the vanilla ProtosDb doesn't
+    // contain the COIExtended subtype), so they land in _phantomProtoStubs. When the
+    // save is re-serialised those phantom stubs get written with their COIExtended
+    // TypeIds; without COIExtended the game cannot load them and reports
+    // "Missing proto detected (Product_Iron (unit))".
+    //
+    // Fix: walk the resolver's entire object graph BEFORE NullAllPhantomStubReferences
+    // and, for every location that holds a phantom stub whose ID exists in the vanilla
+    // ProtosDb (e.g. "Product_Iron"), replace the stub with the REAL vanilla proto.
+    // This covers:
+    //   • Object reference fields (fi.SetValue)
+    //   • Array elements (arr.SetValue)
+    //   • Lyst<T> / List<T> backing-array slots (via m_items / _items)
+    //   • ImmutableArray<T> backing arrays (Mafi uses m_items for its own variant)
+    // After this pass the re-serialised save contains vanilla TypeIds for all replaced
+    // protos, and the game resolves them correctly on load.
+
+    /// <summary>
+    /// Replaces every reference to a phantom proto stub — wherever it lives in the
+    /// resolver's object graph — with the matching vanilla proto from
+    /// <c>_protoHealingLookup.ById</c>.  Only stubs whose string ID resolves to a
+    /// vanilla proto are replaced; the rest are left for the null pass that follows.
+    /// </summary>
+    private void ReplacePhantomProtoRefsWithVanilla(object resolver, IProgress<string>? progress)
+    {
+        if (_phantomProtoStubs is null || _phantomProtoStubs.Count == 0 || _protoHealingLookup is null)
+        {
+            progress?.Report("  Vanilla proto replacement: no phantom stubs or healing lookup — skipped.");
+            return;
+        }
+
+        // Build stub → vanilla replacement map (only stubs whose ID has a vanilla match).
+        // IMPORTANT: do NOT use _protoHealingLookup.GetProtoIdString(stub) here.
+        // Phantom stubs are uninitialized objects; their Proto.ToString() overrides throw
+        // (reading null fields), so GetProtoIdString returns null for them. Instead, read
+        // the <Id>k__BackingField directly and extract the string via the runtime Value
+        // property — same approach NullifyPhantomProtoIds uses successfully on all 669 stubs.
+        var tProtoForStubIds = AssemblyLoader.FindType("Mafi.Core.Prototypes.Proto");
+        var fiStubId = tProtoForStubIds?.GetField("<Id>k__BackingField",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+
+        var replacements = new Dictionary<object, object>(ReferenceEqualityComparer.Instance);
+        int noIdCount = 0;
+        int inByIdCount = 0;
+        var vanillaMatches = new System.Text.StringBuilder();
+        var noMatchSample  = new System.Text.StringBuilder();
+        int noMatchCount   = 0;
+        foreach (var stub in _phantomProtoStubs)
+        {
+            string? stubId = null;
+            try
+            {
+                var idObj = fiStubId?.GetValue(stub);
+                if (idObj is not null)
+                {
+                    var vp = idObj.GetType().GetProperty("Value", BindingFlags.Public | BindingFlags.Instance);
+                    stubId = (vp?.GetValue(idObj) as string) ?? idObj.ToString();
+                }
+            }
+            catch { }
+
+            if (string.IsNullOrEmpty(stubId)) { noIdCount++; continue; }
+
+            if (_protoHealingLookup.ById.TryGetValue(stubId!, out var vanilla))
+            {
+                replacements[stub] = vanilla;
+                inByIdCount++;
+                if (inByIdCount <= 20)
+                    vanillaMatches.Append($"\n    match: type={stub.GetType().Name}, id='{stubId}'");
+            }
+            else
+            {
+                if (noMatchCount++ < 20)
+                    noMatchSample.Append($"\n    no-match: type={stub.GetType().Name}, id='{stubId}'");
+            }
+        }
+        progress?.Report($"  Vanilla proto replacement: {inByIdCount} stubs map to vanilla IDs, {noMatchCount} do not, {noIdCount} have no readable ID.");
+        if (inByIdCount > 0)
+            progress?.Report($"  Vanilla ID matches (first {Math.Min(inByIdCount, 20)}):{vanillaMatches}");
+        else
+            progress?.Report($"  No-match sample (first {Math.Min(noMatchCount, 20)}):{noMatchSample}");
+
+        if (noIdCount > 0)
+            progress?.Report($"  Vanilla proto replacement: {noIdCount} stub(s) had no readable ID (will be handled by null pass).");
+
+        if (replacements.Count == 0)
+        {
+            progress?.Report("  Vanilla proto replacement: no phantom stubs map to vanilla IDs — skipped.");
+            return;
+        }
+
+        progress?.Report($"  Vanilla proto replacement: {replacements.Count} phantom stub(s) have vanilla equivalents — scanning resolver…");
+
+        const BindingFlags allFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        int replaced = 0;
+        int visits   = 0;
+        int logBudget = 100;
+        const int VisitBudget  = 600_000;
+        const int QueueSizeCap = 300_000;
+
+        // ── Collect roots (same scope as NullAllRemovedModEntityReferences) ──
+        var roots = new List<object>();
+        try
+        {
+            var fiResolved = FindFieldDeep(resolver.GetType(), "m_resolvedObjects");
+            if (fiResolved?.GetValue(resolver) is System.Collections.IEnumerable resolved)
+                foreach (var o in resolved) if (o is not null) roots.Add(o);
+        }
+        catch { }
+        SeedRootsFromResolverDict(resolver, "m_resolvedInstancesByRealType", roots);
+        SeedRootsFromResolverDict(resolver, "m_resolvedInstancesByRegisteredType", roots);
+
+        var tEM = AssemblyLoader.FindType("Mafi.Core.Entities.EntitiesManager");
+        if (tEM is not null)
+        {
+            var em = roots.FirstOrDefault(o => tEM.IsAssignableFrom(o.GetType()));
+            if (em is not null)
+            {
+                var fiLinear = FindFieldDeep(em.GetType(), "m_entitiesLinear");
+                if (fiLinear?.GetValue(em) is System.Collections.IEnumerable entities)
+                    foreach (var e in entities) if (e is not null) roots.Add(e);
+            }
+        }
+
+        var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        var queue   = new Queue<object>();
+        foreach (var r in roots) if (r is not null && visited.Add(r)) queue.Enqueue(r);
+
+        while (queue.Count > 0 && visits < VisitBudget)
+        {
+            var obj = queue.Dequeue();
+            visits++;
+            var objType = obj.GetType();
+
+            for (var cur = objType; cur is not null && cur != typeof(object); cur = cur.BaseType)
+            {
+                FieldInfo[] fields;
+                try { fields = cur.GetFields(allFlags | BindingFlags.DeclaredOnly); }
+                catch { continue; }
+
+                foreach (var fi in fields)
+                {
+                    var ft = fi.FieldType;
+                    if (ft == typeof(string)) continue;
+
+                    // Value-type fields can't hold a stub directly, but IEnumerable value
+                    // types (e.g. ImmutableArray<T> as a struct) might wrap an array.
+                    bool ftIsEnumerable = typeof(System.Collections.IEnumerable).IsAssignableFrom(ft);
+                    if (ft.IsValueType && !ftIsEnumerable) continue;
+
+                    object? val;
+                    try { val = fi.GetValue(obj); }
+                    catch { continue; }
+                    if (val is null) continue;
+
+                    // Direct phantom-stub field: replace if field type accepts the vanilla proto.
+                    if (!val.GetType().IsValueType && replacements.TryGetValue(val, out var repl))
+                    {
+                        if (fi.FieldType.IsAssignableFrom(repl.GetType()))
+                        {
+                            try
+                            {
+                                fi.SetValue(obj, repl);
+                                replaced++;
+                                if (logBudget-- > 0)
+                                    progress?.Report($"    Replaced {objType.Name}.{fi.Name}: phantom stub → vanilla '{_protoHealingLookup.GetProtoIdString(repl)}'");
+                            }
+                            catch { }
+                        }
+                        continue; // don't enqueue the stub
+                    }
+
+                    // Collection: replace stub elements in backing array.
+                    if (val is System.Collections.IEnumerable enumerable)
+                    {
+                        replaced += ReplacePhantomStubsInCollection(val, replacements, ref logBudget, progress);
+                        // Enqueue non-stub class elements for further BFS.
+                        try
+                        {
+                            foreach (var elem in enumerable)
+                            {
+                                if (elem is null) continue;
+                                var et = elem.GetType();
+                                if (et.IsValueType || et == typeof(string)) continue;
+                                if (!replacements.ContainsKey(elem) && visited.Add(elem) && queue.Count < QueueSizeCap)
+                                    queue.Enqueue(elem);
+                            }
+                        }
+                        catch { }
+                        continue;
+                    }
+
+                    // Plain object reference — enqueue.
+                    if (visited.Add(val) && queue.Count < QueueSizeCap) queue.Enqueue(val);
+                }
+            }
+        }
+
+        bool budgetHit = visits >= VisitBudget;
+        progress?.Report($"  Vanilla proto replacement: {replaced} phantom stub(s) replaced across {visits:N0} objects{(budgetHit ? " (visit budget hit — some refs may remain)" : "")}.");
+    }
+
+    /// <summary>
+    /// Replaces phantom-stub elements in the backing array of a collection
+    /// (Array, Lyst&lt;T&gt;, List&lt;T&gt;, or ImmutableArray&lt;T&gt; via m_items).
+    /// Returns the number of elements replaced.
+    /// </summary>
+    private int ReplacePhantomStubsInCollection(
+        object collection, Dictionary<object, object> replacements,
+        ref int logBudget, IProgress<string>? progress)
+    {
+        int count = 0;
+        const BindingFlags bf = BindingFlags.NonPublic | BindingFlags.Instance;
+
+        // Case 1: the collection IS an array (e.g. object[], Proto[]).
+        if (collection is Array directArr)
+        {
+            var elemType = directArr.GetType().GetElementType()!;
+            if (elemType.IsValueType) return 0; // can't hold stub refs
+            for (int i = 0; i < directArr.Length; i++)
+            {
+                var elem = directArr.GetValue(i);
+                if (elem is null) continue;
+                if (replacements.TryGetValue(elem, out var repl) && elemType.IsAssignableFrom(repl.GetType()))
+                {
+                    try
+                    {
+                        directArr.SetValue(repl, i);
+                        count++;
+                        if (logBudget-- > 0)
+                            progress?.Report($"    Replaced array[{i}] → vanilla '{_protoHealingLookup?.GetProtoIdString(repl)}'");
+                    }
+                    catch { }
+                }
+            }
+            return count;
+        }
+
+        // Case 2: Lyst<T> / List<T> — backing array at m_items or _items, size at m_size or _size.
+        var colType = collection.GetType();
+        var fiItems = colType.GetField("m_items", bf) ?? colType.GetField("_items", bf);
+        var fiSize  = colType.GetField("m_size",  bf) ?? colType.GetField("_size",  bf);
+
+        if (fiItems?.GetValue(collection) is Array backingArr)
+        {
+            var elemType = backingArr.GetType().GetElementType()!;
+            if (elemType.IsValueType) return count;
+            int size = fiSize is not null ? (int)(fiSize.GetValue(collection) ?? backingArr.Length) : backingArr.Length;
+            for (int i = 0; i < size; i++)
+            {
+                var elem = backingArr.GetValue(i);
+                if (elem is null) continue;
+                if (replacements.TryGetValue(elem, out var repl) && elemType.IsAssignableFrom(repl.GetType()))
+                {
+                    try { backingArr.SetValue(repl, i); count++; }
+                    catch { }
+                }
+            }
+        }
+
+        return count;
+    }
+
     /// <summary>
     /// Walks every reachable object from <paramref name="resolver"/> and from the
     /// EntitiesManager's entity set, and nulls every reference field (or clears every
@@ -3072,8 +3335,8 @@ public sealed partial class DeepEditEngine
 
         progress?.Report($"  Removed-mod entity ref nuller: {roots.Count} root(s), scanning for refs into [{string.Join(", ", stripAssemblies)}].");
 
-        const int VisitBudget  = 1_000_000;
-        const int QueueSizeCap =   500_000;
+        const int VisitBudget  = 5_000_000;
+        const int QueueSizeCap = 2_000_000;
         var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
         var queue   = new Queue<object>();
         foreach (var r in roots)
@@ -3176,11 +3439,32 @@ public sealed partial class DeepEditEngine
                         {
                             // Scan first so we know whether removal is needed.
                             var strippedElems = new List<object>();
+                            const BindingFlags structFieldFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
                             foreach (var elem in enumerable)
                             {
                                 if (elem is null) continue;
                                 var elemType = elem.GetType();
-                                if (elemType.IsValueType || elemType == typeof(string)) continue;
+                                if (elemType == typeof(string)) continue;
+                                if (elemType.IsValueType)
+                                {
+                                    // Struct element (e.g. KeyValuePair<K,V> from Dict<K,V>):
+                                    // the BFS can't enqueue a struct, but its reference-type
+                                    // sub-fields may hold class instances (e.g. the V in
+                                    // Dict<ProductProto, RegisteredBuffers>) that contain
+                                    // stripped refs deeper in the graph.
+                                    foreach (var sfi in elemType.GetFields(structFieldFlags))
+                                    {
+                                        if (sfi.FieldType.IsValueType || sfi.FieldType == typeof(string)) continue;
+                                        object? sv;
+                                        try { sv = sfi.GetValue(elem); } catch { continue; }
+                                        if (sv is null) continue;
+                                        var svType = sv.GetType();
+                                        if (svType.IsValueType) continue;
+                                        if (!ShouldStrip(svType, stripAssemblies) && visited.Add(sv) && queue.Count < QueueSizeCap)
+                                            queue.Enqueue(sv);
+                                    }
+                                    continue;
+                                }
                                 if (ShouldStrip(elemType, stripAssemblies))
                                 {
                                     strippedElems.Add(elem);
@@ -3277,6 +3561,306 @@ public sealed partial class DeepEditEngine
     // This pass scans every resolver object for Mafi Dict<K,V> fields where K is a
     // non-proto reference type, and removes any entry whose key's concrete runtime
     // type belongs to a stripped assembly.
+
+    // ── Broad-object-collection helper shared by the purge passes ─────────────────────
+    // The BFS seeds from three resolver collections; the old per-manager purge only used
+    // m_resolvedObjects and silently missed managers registered only in the type-keyed
+    // dicts. This helper replicates the BFS seed strategy so purges find the same objects.
+    private List<object> CollectAllResolverObjects(object resolver)
+    {
+        var all = new List<object>();
+        try
+        {
+            var fiResolved = FindFieldDeep(resolver.GetType(), "m_resolvedObjects");
+            if (fiResolved?.GetValue(resolver) is System.Collections.IEnumerable resolved)
+                foreach (var o in resolved) if (o is not null) all.Add(o);
+        }
+        catch { }
+        SeedRootsFromResolverDict(resolver, "m_resolvedInstancesByRealType", all);
+        SeedRootsFromResolverDict(resolver, "m_resolvedInstancesByRegisteredType", all);
+        return all;
+    }
+
+    /// <summary>
+    /// Compacts a <c>Lyst&lt;T&gt;</c> (class-backed) by removing items where a nominated
+    /// entity-like reference field is null or belongs to a stripped assembly.
+    /// </summary>
+    private int PurgeLystByField(object lystObj, FieldInfo fiField,
+        HashSet<string> stripAssemblies, bool checkStrip, out int found)
+    {
+        found = 0;
+        if (lystObj is null || fiField is null) return 0;
+        var lystType = lystObj.GetType();
+        var fiItems  = lystType.GetField("m_items", BindingFlags.NonPublic | BindingFlags.Instance);
+        var fiSize   = lystType.GetField("m_size",  BindingFlags.NonPublic | BindingFlags.Instance);
+        if (fiItems is null || fiSize is null) return 0;
+        var items = fiItems.GetValue(lystObj) as Array;
+        var size  = (int)(fiSize.GetValue(lystObj) ?? 0);
+        if (items is null || size == 0) return 0;
+        found = size;
+        int purged = 0, write = 0;
+        for (int i = 0; i < size; i++)
+        {
+            var item = items.GetValue(i);
+            if (item is null) { purged++; continue; }
+            object? fieldVal;
+            try { fieldVal = fiField.GetValue(item); } catch { fieldVal = null; }
+            bool bad = fieldVal is null
+                || (checkStrip && ShouldStrip(fieldVal.GetType(), stripAssemblies));
+            if (bad) { purged++; continue; }
+            items.SetValue(item, write++);
+        }
+        for (int i = write; i < size; i++) items.SetValue(null, i);
+        fiSize.SetValue(lystObj, write);
+        return purged;
+    }
+
+    /// <summary>
+    /// Compacts a <c>LystStruct&lt;T&gt;</c> (value-type-element list; may itself be a struct
+    /// stored in a manager field) by removing entries where a nominated proto-like field
+    /// is null or from a stripped assembly. Handles value-type lyst fields by writing back.
+    /// <para>
+    /// LystStruct&lt;T&gt; internals (Mafi 0.8.x): <c>private T[] m_items</c> and
+    /// <c>public int Count { get; private set; }</c> — Count's backing field is the
+    /// compiler-generated <c>&lt;Count&gt;k__BackingField</c>, NOT "m_size".
+    /// </para>
+    /// </summary>
+    private int PurgeLystStructByProtoField(object manager, string lystFieldName,
+        string protoFieldName, HashSet<string> stripAssemblies,
+        IProgress<string>? progress)
+    {
+        try
+        {
+            var fiLyst = FindFieldDeep(manager.GetType(), lystFieldName);
+            if (fiLyst is null) { progress?.Report($"    [lyst-purge] {manager.GetType().Name}.{lystFieldName} field not found."); return 0; }
+            var lystVal  = fiLyst.GetValue(manager);
+            if (lystVal is null) return 0;
+            var lystType = lystVal.GetType();
+            var fiItems  = lystType.GetField("m_items", BindingFlags.NonPublic | BindingFlags.Instance);
+            // LystStruct uses "public int Count { get; private set; }" — backing field is
+            // "<Count>k__BackingField", not "m_size".
+            var fiCount  = lystType.GetField("<Count>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance)
+                        ?? lystType.GetField("m_size", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (fiItems is null) { progress?.Report($"    [lyst-purge] {lystType.Name}.m_items not found."); return 0; }
+            if (fiCount is null) { progress?.Report($"    [lyst-purge] {lystType.Name} Count/m_size backing field not found."); return 0; }
+            var items = fiItems.GetValue(lystVal) as Array;
+            var size  = (int)(fiCount.GetValue(lystVal) ?? 0);
+            if (items is null || size == 0) return 0;
+
+            var elemType = items.GetType().GetElementType();
+            if (elemType is null) return 0;
+            var fiProto = FindFieldDeep(elemType, protoFieldName);
+            if (fiProto is null) { progress?.Report($"    [lyst-purge] {elemType.Name}.{protoFieldName} field not found."); return 0; }
+
+            int purged = 0, write = 0;
+            for (int i = 0; i < size; i++)
+            {
+                var entry = items.GetValue(i);
+                if (entry is null) { purged++; continue; }
+                object? proto;
+                try { proto = fiProto.GetValue(entry); } catch { proto = null; }
+                bool bad = proto is null || ShouldStrip(proto.GetType(), stripAssemblies);
+                if (bad) { purged++; continue; }
+                if (i != write) items.SetValue(entry, write);
+                write++;
+            }
+            if (purged > 0)
+            {
+                // Zero tail slots with a default-constructed element.
+                try
+                {
+                    var dflt = Activator.CreateInstance(elemType);
+                    for (int i = write; i < size; i++) items.SetValue(dflt, i);
+                }
+                catch { }
+                fiCount.SetValue(lystVal, write);
+                // LystStruct IS a value type — the boxed copy must be written back.
+                if (lystType.IsValueType) fiLyst.SetValue(manager, lystVal);
+                progress?.Report($"    [{manager.GetType().Name}.{lystFieldName}] Purged {purged} null/stripped-proto entries.");
+            }
+            return purged;
+        }
+        catch (Exception ex)
+        {
+            progress?.Report($"    [lyst-purge {lystFieldName}] Exception: {ex.Message}");
+            return 0;
+        }
+    }
+
+    /// Returns any vanilla proto from <c>_protoHealingLookup</c> that is assignable to
+    /// <paramref name="fieldType"/>. Used to assign a fallback proto to vanilla entities
+    /// whose COIExtended proto was nulled by the phantom pass, preventing NullReferenceException
+    /// in WorkersManager.initSelf when it calls Entity.WorkersNeeded.
+    private object? FindAnyVanillaProto(Type fieldType)
+    {
+        if (_protoHealingLookup is null || fieldType is null || fieldType.IsInterface) return null;
+        if (_protoHealingLookup.ByExactType.TryGetValue(fieldType, out var exact) && exact.Count > 0)
+            return exact[0];
+        if (_protoHealingLookup.ByAssignableType.TryGetValue(fieldType, out var assignable) && assignable.Count > 0)
+            return assignable.FirstOrDefault(p => fieldType.IsInstanceOfType(p));
+        return null;
+    }
+
+    /// <summary>
+    /// Removes <c>EntityWorkersAssigner</c> entries from <c>WorkersManager.m_sortedAssigners</c>
+    /// whose Entity is null, from a stripped assembly, or has a stripped-assembly proto.
+    /// Also purges null-proto entries from <c>ElectricityManager</c> and
+    /// <c>MaintenanceManager.Buffer</c> stats lists to prevent duplicate-key crashes in
+    /// their Phase 3 <c>initSelf</c> calls.
+    /// </summary>
+    private void PurgeNullEntityWorkerAssigners(
+        object resolver, HashSet<string> stripAssemblies, IProgress<string>? progress)
+    {
+        try
+        {
+            // ── collect objects from ALL resolver sources (same scope as the BFS) ───────
+            // Previous version only searched m_resolvedObjects; WorkersManager and other
+            // managers are registered in m_resolvedInstancesByRealType /
+            // m_resolvedInstancesByRegisteredType and were silently missed → "Purged 0".
+            var allObjects = CollectAllResolverObjects(resolver);
+
+            int totalPurged = 0;
+
+            // ── WorkersManager.m_sortedAssigners ────────────────────────────────────────
+            var tWorkersManager = AssemblyLoader.FindType("Mafi.Core.Population.WorkersManager");
+            var tEntityWorkersAssigner = AssemblyLoader.FindType("Mafi.Core.Population.WorkersManager+EntityWorkersAssigner");
+            if (tWorkersManager is not null && tEntityWorkersAssigner is not null)
+            {
+                int mgrsFound = 0;
+                foreach (var obj in allObjects)
+                {
+                    if (obj is null || !tWorkersManager.IsAssignableFrom(obj.GetType())) continue;
+                    mgrsFound++;
+
+                    var fiAssigners = FindFieldDeep(obj.GetType(), "m_sortedAssigners");
+                    if (fiAssigners is null) continue;
+                    var assignersList = fiAssigners.GetValue(obj);
+                    if (assignersList is null) continue;
+
+                    var assignersType = assignersList.GetType();
+                    var fiItems = assignersType.GetField("m_items", BindingFlags.NonPublic | BindingFlags.Instance);
+                    var fiSize  = assignersType.GetField("m_size",  BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (fiItems is null || fiSize is null) continue;
+
+                    var items = fiItems.GetValue(assignersList) as Array;
+                    var size  = (int)(fiSize.GetValue(assignersList) ?? 0);
+                    progress?.Report($"    [worker-assigner-purge] m_sortedAssigners size={size}, fiEntity={(FindFieldDeep(tEntityWorkersAssigner, "Entity") is null ? "NULL" : "ok")}");
+                    if (items is null || size == 0) continue;
+
+                    var fiEntity   = FindFieldDeep(tEntityWorkersAssigner, "Entity");
+                    if (fiEntity is null) { progress?.Report("    [worker-assigner-purge] Entity field not found!"); continue; }
+
+                    // Sample up to 5 entity types for diagnostics.
+                    var sampleTypes = new System.Collections.Generic.HashSet<string>();
+                    int write = 0;
+                    for (int i = 0; i < size; i++)
+                    {
+                        var assigner = items.GetValue(i);
+                        if (assigner is null) { totalPurged++; continue; }   // was: write++ (bug)
+                        var entity = fiEntity.GetValue(assigner);
+                        if (entity is null) { totalPurged++; continue; }
+                        if (sampleTypes.Count < 5) sampleTypes.Add(entity.GetType().FullName ?? "?");
+                        // Strip if entity type is from a stripped assembly, or if the entity's
+                        // proto was nulled by the phantom-proto pass (meaning it was a
+                        // COIExtended proto — e.g. a vanilla Truck upgraded to a COIExtended
+                        // VehicleMaker proto, which got nulled when we stripped it).
+                        bool stripByEntityType = ShouldStrip(entity.GetType(), stripAssemblies);
+                        bool stripByProtoType  = false;
+                        if (!stripByEntityType)
+                        {
+                            var fiProtoField = FindFieldDeep(entity.GetType(), "Prototype")
+                                            ?? FindFieldDeep(entity.GetType(), "Proto");
+                            if (fiProtoField is not null)
+                            {
+                                var protoVal = fiProtoField.GetValue(entity);
+                                if (protoVal is not null && ShouldStrip(protoVal.GetType(), stripAssemblies))
+                                {
+                                    // Proto is still a live COIExtended type — serializer can't write it.
+                                    stripByProtoType = true;
+                                }
+                                else if (protoVal is null)
+                                {
+                                    // Proto was nulled by the phantom pass (was a COIExtended proto).
+                                    // Assign any vanilla proto of the correct type so WorkersManager.initSelf
+                                    // can call Entity.WorkersNeeded without NullReferenceException.
+                                    var fallback = FindAnyVanillaProto(fiProtoField.FieldType);
+                                    if (fallback is not null)
+                                        fiProtoField.SetValue(entity, fallback);
+                                    else
+                                        stripByProtoType = true;
+                                }
+                            }
+                        }
+                        if (stripByEntityType || stripByProtoType) { totalPurged++; continue; }
+                        items.SetValue(assigner, write++);
+                    }
+                    for (int i = write; i < size; i++) items.SetValue(null, i);
+                    fiSize.SetValue(assignersList, write);
+                    if (sampleTypes.Count > 0)
+                        progress?.Report($"    [worker-assigner-purge] Sample entity types: {string.Join(", ", sampleTypes)}");
+                }
+                progress?.Report($"  [worker-assigner-purge] Found {mgrsFound} WorkersManager(s). Purged {totalPurged} assigner(s).");
+            }
+
+            // ── ElectricityManager stats lists ───────────────────────────────────────────
+            // m_consumptionStatsPerProto / m_productionStatsPerProto are LystStruct<T>
+            // where T.ConsumerProto/ProducerProto is an IEntityProto. After the phantom
+            // proto pass, stripped-mod protos in these structs become null. When the game
+            // runs ElectricityManager.initSelf it builds m_consumerProtoIdsMap via
+            // Dict.Add(proto, index); duplicate null keys → ArgumentException.
+            var tElec = AssemblyLoader.FindType("Mafi.Core.Factory.ElectricPower.ElectricityManager");
+            if (tElec is not null)
+            {
+                int elecMgrsFound = 0;
+                foreach (var obj in allObjects)
+                {
+                    if (obj is null || !tElec.IsAssignableFrom(obj.GetType())) continue;
+                    elecMgrsFound++;
+                    int p1 = PurgeLystStructByProtoField(obj, "m_consumptionStatsPerProto", "ConsumerProto", stripAssemblies, progress);
+                    int p2 = PurgeLystStructByProtoField(obj, "m_productionStatsPerProto",  "ProducerProto",  stripAssemblies, progress);
+                    totalPurged += p1 + p2;
+                }
+                progress?.Report($"  [elec-stats-purge] Found {elecMgrsFound} ElectricityManager(s), purged {totalPurged} stat entries total.");
+            }
+
+            // ── MaintenanceManager.Buffer stats lists ────────────────────────────────────
+            // Buffer instances are NOT top-level resolver objects; they live inside
+            // MaintenanceManager.m_buffers (Dict<ProductProto, Buffer>).
+            // Walk the dict values to reach each Buffer and purge its ConsumptionStatsPerProto.
+            var tMaintenanceMgr = AssemblyLoader.FindType("Mafi.Core.Maintenance.MaintenanceManager");
+            var tMaintBuf       = AssemblyLoader.FindType("Mafi.Core.Maintenance.MaintenanceManager+Buffer");
+            if (tMaintenanceMgr is not null && tMaintBuf is not null)
+            {
+                int maintFound = 0, maintPurged = 0;
+                foreach (var obj in allObjects)
+                {
+                    if (obj is null || !tMaintenanceMgr.IsAssignableFrom(obj.GetType())) continue;
+                    var fiBuffers = FindFieldDeep(obj.GetType(), "m_buffers");
+                    if (fiBuffers is null) continue;
+                    var buffersDict = fiBuffers.GetValue(obj);
+                    if (buffersDict is not System.Collections.IEnumerable dictEnum) continue;
+                    foreach (var kvp in dictEnum)
+                    {
+                        if (kvp is null) continue;
+                        object? bufferObj;
+                        try { bufferObj = kvp.GetType().GetProperty("Value")?.GetValue(kvp); }
+                        catch { bufferObj = null; }
+                        if (bufferObj is null || !tMaintBuf.IsAssignableFrom(bufferObj.GetType())) continue;
+                        maintFound++;
+                        maintPurged += PurgeLystStructByProtoField(bufferObj, "ConsumptionStatsPerProto", "Proto", stripAssemblies, progress);
+                    }
+                }
+                totalPurged += maintPurged;
+                progress?.Report($"  [maint-stats-purge] Found {maintFound} MaintenanceManager.Buffer(s), purged {maintPurged} stat entries.");
+            }
+
+            progress?.Report($"  [manager-purge] Total purged across all managers: {totalPurged}.");
+        }
+        catch (Exception ex)
+        {
+            progress?.Report($"  [manager-purge] Exception: {ex.Message}");
+        }
+    }
 
     /// <summary>
     /// Removes entries from Mafi <c>Dict&lt;K,V&gt;</c> fields on resolver objects where

@@ -93,7 +93,7 @@ public sealed partial class DeepEditEngine
     {
         for (var t = type; t is not null; t = t.BaseType)
         {
-            var fi = t.GetField(name, BindingFlags.NonPublic | BindingFlags.Instance);
+            var fi = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             if (fi is not null) return fi;
         }
         return null;

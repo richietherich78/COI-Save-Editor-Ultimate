@@ -18,6 +18,7 @@ public sealed partial class DeepEditEngine
     private byte[] ReserialiseAllChunks(
         ParsedSave save,
         ISet<string> modsToRemove,
+        HashSet<string> stripAssemblies,
         object? saveInfo,
         Array? configsArray,
         object resolver,
@@ -42,13 +43,6 @@ public sealed partial class DeepEditEngine
         var miWriteIntNotNeg = FindMethodDeep(writerType, "WriteIntNotNegative", typeof(int))!;
         var miFinalize      = FindMethodDeep(writerType, "FinalizeSerialization")!;
         var miWriterSetSpec = FindMethodDeep(writerType, "SetSpecialSerializers");
-
-        var stripAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var id in modsToRemove)
-        {
-            stripAssemblies.Add(id.Replace('-', '.'));
-            stripAssemblies.Add(id);
-        }
 
         // ── MOD_TYPES ─────────────────────────────────────────────────────
         progress?.Report("  Writing MOD_TYPES…");
@@ -105,7 +99,14 @@ public sealed partial class DeepEditEngine
         {
             var inner = tie.InnerException ?? tie;
             progress?.Report($"  WARNING: RESOLVER FinalizeSerialization error: {inner.GetType().Name}: {inner.Message}");
-            progress?.Report($"  at: {inner.StackTrace?.Split('\n').FirstOrDefault()?.Trim()}");
+            // Log full stack trace (up to 20 frames) so the caller can be identified.
+            var frames = (inner.StackTrace ?? tie.StackTrace ?? "").Split('\n');
+            foreach (var f in frames.Take(20))
+            {
+                var line = f.Trim();
+                if (line.Length > 0)
+                    progress?.Report($"    {line}");
+            }
         }
 
         // ── SAVE_END ──────────────────────────────────────────────────────

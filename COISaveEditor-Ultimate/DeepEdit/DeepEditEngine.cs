@@ -31,7 +31,13 @@ public sealed partial class DeepEditEngine
     private Array?  _capturedConfigsArray;    // IConfig[] (underlying array from ImmutableArray<IConfig>)
     private object? _gameSpecialSerializers;  // ImmutableArray<ISpecialSerializerFactory> — cached for reader+writer
     private object? _populatedProtosDb;       // ProtosDb instance — injected into resolver for Phase 2
-    private HashSet<object>? _phantomProtoStubs; // Proto stubs created for mod protos not in our ProtosDb
+    private HashSet<object>? _phantomProtoStubs;       // Proto stubs created for mod protos not in our ProtosDb
+    private HashSet<object>? _stubsInSlimIdManagers;  // Subset of _phantomProtoStubs that live in SlimIdManager.ManagedProtos
+    // Proto ID strings of all stubs in any SlimIdManager.ManagedProtos.  Used by NullifyPhantomProtoIds
+    // to also protect "sibling" stubs (e.g. ProductStats[i].Product) that are DIFFERENT OBJECTS from the
+    // ManagedProtos stub but encode the same logical proto ID — they must keep the original mod ID so that
+    // both slots resolve to PhantomProto on game load, preserving the SlimId-indexed array alignment.
+    private HashSet<string>? _slimIdProtectedProtoIdStrings;
     // Entities removed by StripBrokenTrajectoryEntities (in addition to the mod-assembly
     // entities removed earlier). Used by the IoPort scrub to also sever ports owned by
     // these entities so the renderer doesn't NRE on orphaned ports.
@@ -131,6 +137,8 @@ public sealed partial class DeepEditEngine
                 stripAssemblies.Add(id);
             }
             var removedAsmNamesEarly = BuildRemovedAssemblyNames(modsToRemove, stripAssemblies);
+            // Expand to full sub-assembly set for all strip/scrub operations below.
+            stripAssemblies = removedAsmNamesEarly;
 
             // Mirrors GameBuilder.RegisterModDependenciesOrThrow so [GlobalDependency]
             // classes — most importantly EntityContext — are auto-instantiated when
@@ -183,7 +191,7 @@ public sealed partial class DeepEditEngine
             // ── Identify + remove objects from unwanted mods ──────────────
             progress?.Report("[STEP:5:8:Filtering mod objects…]");
             Log("Filtering objects from removed mods…");
-            var (removedCount, removedTypes) = StripRemovedModObjects(resolver, modsToRemove, logProgress);
+            var (removedCount, removedTypes) = StripRemovedModObjects(resolver, removedAsmNamesEarly, logProgress);
 
             // Note: stripAssemblies + removedAsmNamesEarly were built earlier (before resolver
             // construction) so the populated-resolver builder could exclude them.
@@ -237,6 +245,11 @@ public sealed partial class DeepEditEngine
             progress?.Report("[STEP:5b:8:Auditing phantom proto references…]");
             AuditPhantomProtoRefs(resolver, logProgress);
 
+            // ── Record which phantom stubs live in SlimIdManager.ManagedProtos ──────────
+            // Must be collected now (before any stubs are modified) so NullifyPhantomProtoIds
+            // can exclude them from ID hijacking.  See NullifyPhantomProtoIds for rationale.
+            CollectSlimIdManagerStubs(resolver, logProgress);
+
             // ── Remove phantom stubs from all resolver collections ─────────
             // Must run before NullifyPhantomProtoIds so stubs are still identifiable by reference.
             // Handles cases like ResearchManager unlocked-node lists where phantom stubs
@@ -251,13 +264,32 @@ public sealed partial class DeepEditEngine
             progress?.Report("[STEP:5d:8:Scrubbing top-level Option<T> for removed-mod T…]");
             ScrubTopLevelRemovedModOptionFields(resolver, stripAssemblies, logProgress);
 
+            // Replace every phantom stub that maps to a vanilla proto ID with the REAL
+            // vanilla proto object — before NullAllPhantomStubReferences nulls the rest.
+            // This is the core fix for "Missing proto detected (Product_Iron)" etc.: COIExtended
+            // overrode vanilla products/machines with its own subtypes; those subtypes become
+            // phantom stubs in our vanilla-only ProtosDb; when re-serialised as COIExtended
+            // TypeIds the game can't load them without the mod. Replacing them with actual
+            // vanilla proto objects ensures the re-serialised save uses vanilla TypeIds.
+            progress?.Report("[STEP:5e:8:Replace phantom stubs with vanilla proto refs…]");
+            ReplacePhantomProtoRefsWithVanilla(resolver, logProgress);
+
             // Final catch-all: walk the whole reachable object graph (resolver + entities)
             // and null every reference field that holds a phantom proto stub. This is the
             // safety net behind every structural scrub above; without it, ~15 stubs survive
             // in containing types we don't have a dedicated branch for (ProductProto,
             // ActiveLoan, settlement modules, …) and the validator catches them on output.
-            progress?.Report("[STEP:5e:8:Catch-all phantom-ref null pass…]");
+            progress?.Report("[STEP:5f:8:Catch-all phantom-ref null pass…]");
             NullAllPhantomStubReferences(resolver, logProgress);
+
+            // Initialize all Mafi.Collections (Dict, Set, Lyst) BEFORE the entity-ref
+            // nuller so the BFS can traverse them. Without this, State B dicts
+            // (m_buckets=null) throw "not initialized after load" when GetEnumerator is
+            // called, so the BFS silently skips their contents. Specifically,
+            // RegisteredOutputBuffer.OwnerEntity refs inside VehicleBuffersRegistry
+            // m_registeredBuffersPerEntity values are invisible to the BFS when the dict
+            // is State B — they only become reachable after initAfterLoad rebuilds buckets.
+            RunDictInitAfterLoadCallbacks(reader, logProgress);
 
             // Null any reference from vanilla objects to already-stripped mod entities
             // (e.g. IoPort.m_connected pointing at a SmartZipper/FishFarm that was stripped).
@@ -265,6 +297,33 @@ public sealed partial class DeepEditEngine
             // and writes the mod entity's AQN → CorruptedSaveException on game load.
             progress?.Report("[STEP:5f:8:Null dangling removed-mod entity refs…]");
             NullAllRemovedModEntityReferences(resolver, stripAssemblies, logProgress);
+
+            // Remove stripped-entity keys from Mafi Dict<K,V> fields on resolver objects
+            // (e.g. VehicleBuffersRegistry.m_registeredBuffersPerEntity: Dict<IStaticEntity,…>).
+            // The BFS above skips KVP value types so those keys survive — the AQN patcher then
+            // rewrites them to System.Object, which passes validation but crashes the game on
+            // load ("Object not assignable to IStaticEntity").
+            progress?.Report("[STEP:5f2:8:Scrub stripped-entity Dict keys…]");
+            ScrubStrippedEntityKeysFromManagerDicts(resolver, stripAssemblies, logProgress);
+
+            // WorkersManager.m_sortedAssigners is a Lyst<EntityWorkersAssigner> that is
+            // serialized and used during Phase 3 (initSelf) to rebuild m_assignersMap via
+            // m_assignersMap.Add(assigner.Entity, assigner). The entity-ref-nuller above
+            // nulled Entity on assigners for stripped entities, leaving null keys. Mafi's
+            // Dict.Add with a null key throws NullReferenceException, aborting initSelf
+            // before all valid entities (Locomotives, Machines, …) are registered — causing
+            // "Entity X not registered!" spam for every entity on every sim tick.
+            // Fix: remove null-entity assigners from m_sortedAssigners before re-serializing.
+            progress?.Report("[STEP:5f3:8:Purge null-entity/proto manager lists…]");
+            PurgeNullEntityWorkerAssigners(resolver, stripAssemblies, logProgress);
+
+            // Assign vanilla recipes to machines whose m_recipesAssigned was emptied by
+            // stripping (e.g. BoilerGas, SmokeStack, DistillationTower running COI-Extended
+            // exclusive recipes). Must run after all phantom stripping and proto healing so
+            // (a) phantom recipe stubs are gone from m_recipesAssigned, and (b) the machine's
+            // m_proto is already the healed vanilla proto whose m_recipes we read.
+            progress?.Report("[STEP:5f4:8:Heal empty machine recipe lists…]");
+            HealMachineRecipes(resolver, logProgress);
 
             // Drop saved IMessageNotification entries that reference null/phantom protos.
             // The notification UI (ResearchTab, MessagesTab) dereferences proto fields
@@ -289,7 +348,7 @@ public sealed partial class DeepEditEngine
             PurgeModAssemblyObjectsFromResolver(resolver, stripAssemblies, logProgress);
 
             // ── Fix up objects whose Phase 3 didn't fully run ─────────────
-            PrepareObjectsForReserialization(resolver, logProgress);
+            PrepareObjectsForReserialization(resolver, reader, logProgress);
 
             // ── Nullify phantom proto IDs so the game doesn't encounter unresolvable IDs
             NullifyPhantomProtoIds(logProgress);
@@ -325,7 +384,7 @@ public sealed partial class DeepEditEngine
             progress?.Report("[STEP:6:8:Re-serializing…]");
             Log("Re-serialising all chunks (MOD_TYPES → SAVE_INFO → CONFIGS → RESOLVER)…");
             byte[] decompressedPayload = ReserialiseAllChunks(
-                save, modsToRemove, _capturedSaveInfo, _capturedConfigsArray,
+                save, modsToRemove, removedAsmNamesEarly, _capturedSaveInfo, _capturedConfigsArray,
                 resolver, logProgress);
 
             // ── Validate output for Mono incompatible type references ────────
@@ -552,6 +611,10 @@ public sealed partial class DeepEditEngine
         _populatedProtosDb     = null;
         _phantomProtoStubs?.Clear();
         _phantomProtoStubs     = null;
+        _stubsInSlimIdManagers?.Clear();
+        _stubsInSlimIdManagers  = null;
+        _slimIdProtectedProtoIdStrings?.Clear();
+        _slimIdProtectedProtoIdStrings = null;
         _strippedBrokenEntities?.Clear();
         _strippedBrokenEntities = null;
         _lystStructDiagnosticDumped = null;

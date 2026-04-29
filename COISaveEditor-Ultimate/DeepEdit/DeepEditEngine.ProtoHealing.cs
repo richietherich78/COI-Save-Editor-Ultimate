@@ -329,23 +329,25 @@ public sealed partial class DeepEditEngine
             //
             // Tier-aware preference: many phantom IDs are tier-suffixed (e.g. T4, T6,
             // III, IV, "Large", etc.) added by COIExtended. The vanilla game has lower
-            // tiers of the same family. We want to substitute the HIGHEST AVAILABLE
-            // vanilla tier, not the lowest (otherwise a player's T4 conveyor network
-            // silently downgrades to T1, halving throughput → simulation backlog →
-            // game lockup). Strategy:
-            //   a. Strip the trailing tier marker from the phantom ID to get a "stem".
-            //   b. Among candidates whose ID begins with that stem, pick the one with
-            //      the LARGEST trailing tier marker (T3 > T2 > T1).
-            //   c. Fall back to the original longest-substring rule if no stem-prefix
-            //      candidates exist.
+            // tiers of the same family. Default: substitute the HIGHEST AVAILABLE
+            // vanilla tier (so a player's T4 conveyor heals to T3, not T1).
+            // Exception: when the phantom's own trailing tier marker is explicitly T1-T9,
+            // prefer the candidate whose rank matches — e.g. DistillationTowerT2 should
+            // heal to T2, not T3. Falls back to highest available if no exact match exists.
             if (!string.IsNullOrEmpty(phantomIdStr))
             {
                 object? best = null;
 
+                // Extract explicit tier from phantom's trailing TN marker.
+                int phantomTierInStem = 0;
+                if (phantomIdStr.Length >= 2
+                    && phantomIdStr[^2] == 'T' && phantomIdStr[^1] is >= '1' and <= '9')
+                    phantomTierInStem = phantomIdStr[^1] - '0';
+
                 var stem = StripTierSuffix(phantomIdStr);
                 if (!string.IsNullOrEmpty(stem))
                 {
-                    int bestRank = int.MinValue;
+                    int bestScore = int.MinValue;
                     foreach (var candidate in candidates)
                     {
                         var candidateId = lookup.GetProtoIdString(candidate) ?? "";
@@ -359,10 +361,12 @@ public sealed partial class DeepEditEngine
                         if (rank == int.MinValue) continue;
                         // Shape-compatibility guard: reject if PortsShape IDs differ.
                         if (!AreProtoShapesCompatible(phantomProto, candidate, lookup)) continue;
-                        if (rank > bestRank)
+                        // Score: prefer exact tier match (500-pt bonus), then highest rank.
+                        int candidateScore = rank + (phantomTierInStem > 0 && rank == phantomTierInStem ? 500 : 0);
+                        if (candidateScore > bestScore)
                         {
                             best = candidate;
-                            bestRank = rank;
+                            bestScore = candidateScore;
                         }
                     }
                 }
@@ -469,6 +473,144 @@ public sealed partial class DeepEditEngine
                 progress?.Report($"      No vanilla {concreteType.Name} (or any assignable subclass) registered — phantom is mod-only content.");
             }
         }
+
+        // Last-resort fallback: if there are vanilla protos of the declared field type AND
+        // at least one candidate shares a 5-char substring with the phantom ID (semantic
+        // relatedness guard), assign the best-scoring candidate.
+        // Handles mod-added IDs like 'LargeTruckD' / 'RetainingWallRamp4Up' where the mod
+        // extended a vanilla family but used a non-matching ID prefix.
+        // The overlap guard prevents healing semantically unrelated phantoms (e.g. CopperMine
+        // → OilRig would be wrong; those entities are better left for stripping).
+        {
+            var fbPool = (lookup.ByExactType.TryGetValue(declaredType, out var fbEx) ? fbEx : null)
+                      ?? (lookup.ByAssignableType.TryGetValue(declaredType, out var fbAsgn) ? fbAsgn : null);
+            if (fbPool is { Count: > 0 })
+            {
+                // Require that the candidate's prefix (≥minLen chars) appears INSIDE the
+                // phantom ID. This is intentionally one-directional (candidate→phantom only):
+                // the bidirectional version let phantom prefix "HighP" appear inside
+                // "TurbineHighPressT2", making HighPressureBoiler wrongly match a turbine.
+                // One direction still passes all valid mod-extension families:
+                //   "LargeTruckD" phantom: candidate prefix "Truck" appears inside phantom ✓
+                //   "LargeExcavatorH" phantom: "Excav" appears inside phantom ✓
+                //   "HighPressureBoiler" phantom: "Boile" appears inside phantom ✓
+                //   "HighPressureBoiler" vs "TurbineHighPressT2": "Turbi" NOT in phantom ✗ (correct rejection)
+                static bool HasIdOverlap(string phantom, string candidate, int minLen)
+                {
+                    if (phantom.Length < minLen || candidate.Length < minLen) return false;
+                    var candidatePrefix = candidate.Substring(0, minLen);
+                    return phantom.IndexOf(candidatePrefix, StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+
+                // Extract variant letter from phantom ID (single D/H/S/X preceded by lowercase).
+                char phantomVariant = '\0';
+                if (!string.IsNullOrEmpty(phantomIdStr) && phantomIdStr.Length >= 2)
+                {
+                    char last = phantomIdStr[^1];
+                    char prev = phantomIdStr[^2];
+                    if ((last == 'D' || last == 'H' || last == 'S' || last == 'X')
+                        && char.IsLetter(prev) && char.IsLower(prev))
+                        phantomVariant = last;
+                }
+
+                // Extract explicit tier from phantom's trailing TN marker (e.g. "DistillationTowerS2T2" → T=2).
+                int phantomTier = 0;
+                if (!string.IsNullOrEmpty(phantomIdStr) && phantomIdStr.Length >= 2
+                    && phantomIdStr[^2] == 'T' && phantomIdStr[^1] is >= '1' and <= '9')
+                    phantomTier = phantomIdStr[^1] - '0';
+
+                // Extract COIExtended series number from phantom ID: "SN" where N=1..9.
+                // In COIExtended's naming scheme, "S" is the vanilla-equivalent stage:
+                // DistillationTowerS1T2 = Stage-I variant → vanilla T1
+                // DistillationTowerS3T2 = Stage-III variant → vanilla T3
+                // The S-number takes priority over the T-number when picking vanilla tier.
+                int phantomSNum = 0;
+                if (!string.IsNullOrEmpty(phantomIdStr))
+                {
+                    for (int si = 0; si < phantomIdStr.Length - 1; si++)
+                    {
+                        if (phantomIdStr[si] == 'S' && phantomIdStr[si + 1] >= '1' && phantomIdStr[si + 1] <= '9')
+                        {
+                            phantomSNum = phantomIdStr[si + 1] - '0';
+                            break;
+                        }
+                    }
+                }
+
+                // Fuel-type tiebreaker: prefer Gas > Coal/Coke > Electric within same tier.
+                // If the phantom ID contains an explicit fuel hint we match it; otherwise
+                // we apply the default ordering (Gas preferred — COI progression bias).
+                // Values are small (≤20) so they never override tier bonuses (≥500).
+                static int FuelTypeBonus(string phantomId, string candidateId)
+                {
+                    bool pGas  = phantomId.IndexOf("Gas",  StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool pCoal = phantomId.IndexOf("Coal", StringComparison.OrdinalIgnoreCase) >= 0
+                              || phantomId.IndexOf("Coke", StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool pElec = phantomId.IndexOf("Elec", StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool cGas  = candidateId.IndexOf("Gas",  StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool cCoal = candidateId.IndexOf("Coal", StringComparison.OrdinalIgnoreCase) >= 0
+                              || candidateId.IndexOf("Coke", StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool cElec = candidateId.IndexOf("Elec", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (pGas || pCoal || pElec)
+                    {
+                        // Explicit fuel in phantom — reward matching, penalise mismatch.
+                        if ((pGas && cGas) || (pCoal && cCoal) || (pElec && cElec)) return 20;
+                        if (cGas || cCoal || cElec) return -10;
+                        return 0;
+                    }
+                    // No hint in phantom: prefer Gas > Coal/Coke > Electric (upgrade-path default).
+                    if (cGas)  return 8;
+                    if (cCoal) return 4;
+                    if (cElec) return 2;
+                    return 0;
+                }
+
+                object? bestFb = null;
+                int bestScore = int.MinValue;
+                foreach (var c in fbPool)
+                {
+                    if (!declaredType.IsInstanceOfType(c)) continue;
+                    if (!AreProtoShapesCompatible(phantomProto, c, lookup)) continue;
+                    var cId = lookup.GetProtoIdString(c) ?? "";
+                    // Require non-empty phantom ID AND semantic relatedness (≥5 consecutive
+                    // chars in common). Empty-ID phantoms are not safe to heal blindly.
+                    if (string.IsNullOrEmpty(phantomIdStr) || !HasIdOverlap(phantomIdStr, cId, 5)) continue;
+                    // Primary score: highest digit in candidate ID (T1/T2/T3 embedded anywhere).
+                    // "TruckT3Loose" has '3' → maxDigit=3 → score 300. "TruckAmphibious" → 0.
+                    int maxDigit = 0;
+                    foreach (char ch in cId)
+                        if (ch >= '1' && ch <= '9' && (ch - '0') > maxDigit) maxDigit = ch - '0';
+                    int score = maxDigit * 100;
+                    // S-number bonus (highest priority): phantom's "SN" maps to vanilla tier N.
+                    // "DistillationTowerS3T2" → S=3 → prefer vanilla with maxDigit=3.
+                    // 700 pts dominates T-match (500) and tier gap (300 max).
+                    if (phantomSNum > 0 && maxDigit == phantomSNum)
+                        score += 700;
+                    // T-number bonus: phantom's trailing TN suffix → prefer matching tier.
+                    // "DistillationTowerS2T2" → T=2, S=2 → both bonuses for T2 candidate.
+                    if (phantomTier > 0 && maxDigit == phantomTier)
+                        score += 500;
+                    // Secondary: variant letter match (D=diesel, H=hydrogen, S=steam).
+                    char cVariant = (cId.Length >= 2
+                        && (cId[^1] == 'H' || cId[^1] == 'D' || cId[^1] == 'S' || cId[^1] == 'X')
+                        && char.IsLetter(cId[^2]) && char.IsLower(cId[^2])) ? cId[^1] : '\0';
+                    if (phantomVariant != '\0' && cVariant == phantomVariant)
+                        score += 10; // matching variant
+                    else if (cVariant != '\0' && cVariant != phantomVariant)
+                        score -= 5;  // mismatched variant
+                    // Fuel-type tiebreaker (Gas > Coal > Electric).
+                    score += FuelTypeBonus(phantomIdStr, cId);
+                    if (score > bestScore) { bestFb = c; bestScore = score; }
+                }
+                if (bestFb is not null)
+                {
+                    fi.SetValue(obj, bestFb);
+                    progress?.Report($"    Last-resort healed {obj.GetType().Name}.{fi.Name}: assigned nearest vanilla '{lookup.GetProtoIdString(bestFb)}' for unmatched '{phantomIdStr}'");
+                    return true;
+                }
+            }
+        }
+
         return false;
     }
 
