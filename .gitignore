@@ -68,6 +68,8 @@ artifacts/
 *.DotSettings.user
 publish/
 tools/
+build2.txt
+build_out.txt
 
 # JetBrains Rider
 .idea/
