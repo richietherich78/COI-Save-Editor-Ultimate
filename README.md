@@ -1,6 +1,10 @@
-# COI Save Editor — Ultimate
+<p align="center">
+  <img src="COISaveEditor-Ultimate/Assets/logo256.png" alt="COI Save Editor Ultimate" width="160">
+</p>
 
-A Windows desktop tool for removing mods from [Captain of Industry](https://store.steampowered.com/app/1594320/Captain_of_Industry/) save files without losing your progress.
+<h1 align="center">COI Save Editor — Ultimate</h1>
+
+<p align="center">A Windows desktop tool for removing mods from <a href="https://store.steampowered.com/app/1594320/Captain_of_Industry/">Captain of Industry</a> save files without losing your progress.</p>
 
 When you uninstall a mod, the game often refuses to load the save because it still references types, configs, and objects from that mod. This editor strips those references so the save can load cleanly on vanilla or with a different mod set.
 
