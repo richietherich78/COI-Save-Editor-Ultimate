@@ -1,5 +1,6 @@
 using System.IO;
 using System.IO.Compression;
+using System.Reflection;
 using COISaveEditorUltimate.Models;
 using COISaveEditorUltimate.Parsing;
 
@@ -114,6 +115,49 @@ public sealed partial class DeepEditEngine
         else
             progress?.Report($"  [WARN] {hits} System.Private.CoreLib reference(s) found — save may fail to load on game's Mono runtime.");
         return hits;
+    }
+
+    /// <summary>
+    /// If the loaded DLLs report a newer CURRENT_SAVE_VERSION than the original save,
+    /// upgrades save.SaveVersion so the output header tells the game to use the newer
+    /// deserialization paths (e.g. [NewInSaveVersion(289)] fields in TrainLinesManager).
+    /// Without this, a save written by 0.8.3 DLLs but stamped with the old version
+    /// header causes byte-stream misalignment and CorruptedSaveException on game load.
+    /// </summary>
+    internal static void UpgradeSaveVersionIfNeeded(ParsedSave save, IProgress<string>? progress)
+    {
+        try
+        {
+            var tSaveVersion = AssemblyLoader.FindType("Mafi.SaveVersion");
+            if (tSaveVersion is null)
+            {
+                progress?.Report("  [SaveVersion] Mafi.SaveVersion type not found — header version unchanged.");
+                return;
+            }
+
+            var fi = tSaveVersion.GetField("CURRENT_SAVE_VERSION",
+                BindingFlags.Public | BindingFlags.Static);
+            if (fi is null)
+            {
+                progress?.Report("  [SaveVersion] CURRENT_SAVE_VERSION field not found — header version unchanged.");
+                return;
+            }
+
+            int dllVersion = (int)fi.GetValue(null)!;
+            if (dllVersion > save.SaveVersion)
+            {
+                progress?.Report($"  [SaveVersion] Upgrading output header version: {save.SaveVersion} → {dllVersion} (DLL CURRENT_SAVE_VERSION).");
+                save.SaveVersion = dllVersion;
+            }
+            else
+            {
+                progress?.Report($"  [SaveVersion] Output header version {save.SaveVersion} already matches DLL version {dllVersion} — no change.");
+            }
+        }
+        catch (Exception ex)
+        {
+            progress?.Report($"  [SaveVersion] Could not read DLL save version: {ex.Message} — header version unchanged.");
+        }
     }
 
     private static DeepEditResult Fail(string msg) =>

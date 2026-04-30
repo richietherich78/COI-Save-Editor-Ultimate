@@ -188,6 +188,15 @@ public sealed partial class DeepEditEngine
                 reader, resolver, logProgress, detailLog,
                 preferDirect: false);
 
+            // ── Diagnostic: dump all resolved object types immediately after Phase 2 ──
+            LogAllResolvedObjectTypes(resolver, logProgress, label: "-AfterPhase2");
+
+            // ── Remove objects added by newer DLL versions that weren't in the original save ──
+            // Newer game DLLs may resolve extra vanilla managers during Phase 2 that did not
+            // exist when the save was created. These inflate m_resolvedObjects, shifting every
+            // BlobWriter object-ID and corrupting back-references on load.
+            RemoveKnownDllVersionAddedObjects(resolver, logProgress);
+
             // ── Identify + remove objects from unwanted mods ──────────────
             progress?.Report("[STEP:5:8:Filtering mod objects…]");
             Log("Filtering objects from removed mods…");
@@ -341,6 +350,9 @@ public sealed partial class DeepEditEngine
             progress?.Report("[STEP:5g:8:Scrub dangling IoPort connections…]");
             ScrubDanglingIoPortConnections(resolver, stripAssemblies, logProgress);
 
+            // ── Diagnostic: dump all resolved object types before final purge (insertion order) ──
+            LogResolvedObjectsInOrder(resolver, logProgress, label: "-PrePurge");
+
             // ── Final safety sweep: purge any remaining mod-assembly objects from
             // m_resolvedObjects that individual passes may have missed (e.g. entities
             // that were registered in the resolver but not removed by StripSpecificObjects
@@ -475,6 +487,11 @@ public sealed partial class DeepEditEngine
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
             long memAfterGc = GC.GetTotalMemory(false);
             Log($"Post-GC memory: {memAfterGc / (1024.0 * 1024.0):F0} MB");
+
+            // ── Upgrade save version header to match DLL if needed ────────
+            // Must run after re-serialization (so DLLs are loaded) but before
+            // BuildSaveFile* writes the header.  See UpgradeSaveVersionIfNeeded.
+            UpgradeSaveVersionIfNeeded(save, logProgress);
 
             // ── Build the final .save file ─────────────────────────────────
             progress?.Report("[STEP:7:8:Compressing…]");
