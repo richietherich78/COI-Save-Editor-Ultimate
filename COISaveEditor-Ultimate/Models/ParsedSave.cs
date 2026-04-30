@@ -21,7 +21,7 @@ public sealed class ParsedSave
 {
     // ── Outer header (first 40 bytes of file) ──────────────────────────────
 
-    public int SaveVersion { get; init; }
+    public int SaveVersion { get; internal set; }
     public int CompressionType { get; init; }
 
     // ── Decompressed payload ───────────────────────────────────────────────

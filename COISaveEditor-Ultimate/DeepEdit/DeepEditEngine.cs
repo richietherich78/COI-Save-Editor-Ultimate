@@ -488,6 +488,11 @@ public sealed partial class DeepEditEngine
             long memAfterGc = GC.GetTotalMemory(false);
             Log($"Post-GC memory: {memAfterGc / (1024.0 * 1024.0):F0} MB");
 
+            // ── Upgrade save version header to match DLL if needed ────────
+            // Must run after re-serialization (so DLLs are loaded) but before
+            // BuildSaveFile* writes the header.  See UpgradeSaveVersionIfNeeded.
+            UpgradeSaveVersionIfNeeded(save, logProgress);
+
             // ── Build the final .save file ─────────────────────────────────
             progress?.Report("[STEP:7:8:Compressing…]");
             Log("Compressing and building save file…");
