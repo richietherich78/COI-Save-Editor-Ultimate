@@ -380,6 +380,168 @@ public sealed partial class DeepEditEngine
         progress?.Report($"  [PreSerialiseDump] {totalHits} mod-assembly entry(ies) STILL in resolver collections at re-serialise time.");
     }
 
+    /// <summary>
+    /// Diagnostic: logs the type name of every object in m_resolvedObjects, numbered
+    /// and sorted. Used to diff two runs and identify any extra/missing objects.
+    /// Pure logging — does not modify state.
+    /// </summary>
+    internal static void LogAllResolvedObjectTypes(object resolver, IProgress<string>? progress, string label = "")
+    {
+        try
+        {
+            var fi = FindFieldDeep(resolver.GetType(), "m_resolvedObjects");
+            if (fi?.GetValue(resolver) is not System.Collections.IEnumerable lyst) return;
+
+            var types = new List<string>();
+            foreach (var item in lyst)
+                types.Add(item?.GetType().FullName ?? "<null>");
+
+            var sorted = types.ToList();
+            sorted.Sort(StringComparer.Ordinal);
+
+            progress?.Report($"  [ResolvedTypeList{label}] count={types.Count}");
+            for (int i = 0; i < sorted.Count; i++)
+                progress?.Report($"  [ResolvedTypeList{label}] {i,3}: {sorted[i]}");
+        }
+        catch (Exception ex)
+        {
+            progress?.Report($"  [ResolvedTypeList{label}] scan threw {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Logs every object in m_resolvedObjects in INSERTION ORDER with its sequential index.
+    /// Unlike LogAllResolvedObjectTypes (which sorts), this preserves the order BlobWriter
+    /// will use to assign object IDs — essential for diagnosing ID-shift crashes.
+    /// </summary>
+    internal static void LogResolvedObjectsInOrder(object resolver, IProgress<string>? progress, string label = "")
+    {
+        try
+        {
+            var fi = FindFieldDeep(resolver.GetType(), "m_resolvedObjects");
+            if (fi?.GetValue(resolver) is not System.Collections.IEnumerable lyst) return;
+
+            int i = 0;
+            progress?.Report($"  [ResolvedOrder{label}] (insertion order)");
+            foreach (var item in lyst)
+                progress?.Report($"  [ResolvedOrder{label}] {i++,3}: {item?.GetType().FullName ?? "<null>"}");
+            progress?.Report($"  [ResolvedOrder{label}] total={i}");
+        }
+        catch (Exception ex)
+        {
+            progress?.Report($"  [ResolvedOrder{label}] scan threw {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // ── Phase-2 new-type purge ────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns a snapshot of all concrete runtime types currently in m_resolvedObjects.
+    /// Call before Phase 2 (FinalizeLoading) to establish a baseline of types that were
+    /// actually deserialized from the save file.
+    /// </summary>
+    private static HashSet<Type> SnapshotResolvedObjectTypes(object resolver)
+    {
+        var result = new HashSet<Type>();
+        try
+        {
+            var fi = FindFieldDeep(resolver.GetType(), "m_resolvedObjects");
+            if (fi?.GetValue(resolver) is not System.Collections.IEnumerable lyst) return result;
+            foreach (var item in lyst)
+                if (item is not null) result.Add(item.GetType());
+        }
+        catch { /* best-effort */ }
+        return result;
+    }
+
+    /// <summary>
+    /// Removes from m_resolvedObjects any object that (a) was added during Phase 2 and
+    /// (b) has a concrete type that was NOT present in m_resolvedObjects before Phase 2.
+    /// Such objects are vanilla managers newly introduced in the current game DLL version
+    /// that didn't exist when the save file was originally created. Including them inflates
+    /// the BlobWriter object-ID sequence, causing off-by-N back-references in later managers
+    /// (e.g. TrainLinesManager CorruptedSaveException).
+    /// </summary>
+    private static void PurgePhase2AddedNewTypeObjects(
+        object resolver, HashSet<Type> prePhase2Types, IProgress<string>? progress)
+    {
+        try
+        {
+            var fi = FindFieldDeep(resolver.GetType(), "m_resolvedObjects");
+            if (fi?.GetValue(resolver) is not System.Collections.IEnumerable lyst) return;
+
+            var allItems = lyst.Cast<object?>().ToList();
+            var toRemove = new List<object>();
+            foreach (var item in allItems)
+            {
+                if (item is null) continue;
+                var t = item.GetType();
+                // Only remove vanilla objects (not mod assemblies — those are handled elsewhere).
+                // A type is "new to this DLL version" when it never appeared in the pre-Phase2 snapshot.
+                if (!prePhase2Types.Contains(t) && !t.Assembly.GetName().Name!.StartsWith("COIExtended", StringComparison.OrdinalIgnoreCase))
+                    toRemove.Add(item);
+            }
+
+            if (toRemove.Count == 0) return;
+
+            var miRemove = lyst.GetType().GetMethod("Remove");
+            foreach (var obj in toRemove)
+            {
+                progress?.Report($"  [Phase2NewTypePurge] Removing DLL-version-new type {obj.GetType().FullName}");
+                miRemove?.Invoke(lyst, new[] { obj });
+            }
+            progress?.Report($"  [Phase2NewTypePurge] Removed {toRemove.Count} DLL-version-new object(s).");
+        }
+        catch (Exception ex)
+        {
+            progress?.Report($"  [Phase2NewTypePurge] Error: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // ── Targeted DLL-version delta removal ───────────────────────────────
+    // Types added to m_resolvedObjects by Phase 2 in newer game DLL versions
+    // that were NOT present when the save was originally created. Including them
+    // shifts every subsequent BlobWriter object-ID by N, corrupting back-references
+    // (symptom: TrainLinesManager CorruptedSaveException on load).
+    // These objects are safe to remove — the game recreates them during its own
+    // Phase 2 when loading the save.
+    private static readonly string[] _knownDllVersionAddedTypes =
+    {
+        "Mafi.Core.Trains.TrainNetworksManager",  // added by 0.8.3 DLLs; absent in 0.8.2 saves
+    };
+
+    private static void RemoveKnownDllVersionAddedObjects(object resolver, IProgress<string>? progress)
+    {
+        try
+        {
+            var fi = FindFieldDeep(resolver.GetType(), "m_resolvedObjects");
+            if (fi?.GetValue(resolver) is not System.Collections.IEnumerable lyst) return;
+
+            var items = lyst.Cast<object?>().ToList();
+            var miRemove = lyst.GetType().GetMethod("Remove");
+            int removed = 0;
+            foreach (var item in items)
+            {
+                if (item is null) continue;
+                var fullName = item.GetType().FullName ?? "";
+                if (Array.IndexOf(_knownDllVersionAddedTypes, fullName) >= 0)
+                {
+                    miRemove?.Invoke(lyst, new[] { item });
+                    progress?.Report($"  [DllDeltaPurge] Removed version-added object: {fullName}");
+                    removed++;
+                }
+            }
+            if (removed > 0)
+                progress?.Report($"  [DllDeltaPurge] Removed {removed} version-added object(s) from m_resolvedObjects.");
+            else
+                progress?.Report($"  [DllDeltaPurge] No version-added objects found (save already matches DLL version).");
+        }
+        catch (Exception ex)
+        {
+            progress?.Report($"  [DllDeltaPurge] Error: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     // ── Null-proto entity stripping ───────────────────────────────────────
 
     private void StripNullProtoEntities(object resolver, HashSet<string> stripAssemblies, IProgress<string>? progress)

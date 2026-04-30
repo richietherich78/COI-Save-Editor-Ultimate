@@ -188,6 +188,15 @@ public sealed partial class DeepEditEngine
                 reader, resolver, logProgress, detailLog,
                 preferDirect: false);
 
+            // ── Diagnostic: dump all resolved object types immediately after Phase 2 ──
+            LogAllResolvedObjectTypes(resolver, logProgress, label: "-AfterPhase2");
+
+            // ── Remove objects added by newer DLL versions that weren't in the original save ──
+            // Newer game DLLs may resolve extra vanilla managers during Phase 2 that did not
+            // exist when the save was created. These inflate m_resolvedObjects, shifting every
+            // BlobWriter object-ID and corrupting back-references on load.
+            RemoveKnownDllVersionAddedObjects(resolver, logProgress);
+
             // ── Identify + remove objects from unwanted mods ──────────────
             progress?.Report("[STEP:5:8:Filtering mod objects…]");
             Log("Filtering objects from removed mods…");
@@ -340,6 +349,9 @@ public sealed partial class DeepEditEngine
             // can't reliably reach (SmartZipper/FishFarm/CargoShipDrydock AQN path).
             progress?.Report("[STEP:5g:8:Scrub dangling IoPort connections…]");
             ScrubDanglingIoPortConnections(resolver, stripAssemblies, logProgress);
+
+            // ── Diagnostic: dump all resolved object types before final purge (insertion order) ──
+            LogResolvedObjectsInOrder(resolver, logProgress, label: "-PrePurge");
 
             // ── Final safety sweep: purge any remaining mod-assembly objects from
             // m_resolvedObjects that individual passes may have missed (e.g. entities
