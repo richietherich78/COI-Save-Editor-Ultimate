@@ -8,8 +8,11 @@ namespace COISaveEditorUltimate;
 /// </summary>
 public sealed class AppSettings
 {
+    private static readonly string SettingsDir =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "COISaveEditor");
+
     private static readonly string SettingsPath =
-        @"G:\COI Mods\COIUltimateSaveEditor - Config File save\COISaveEditor.settings.json";
+        Path.Combine(SettingsDir, "settings.json");
 
     // ── Properties ────────────────────────────────────────────────────────
 
@@ -60,6 +63,7 @@ public sealed class AppSettings
     {
         try
         {
+            Directory.CreateDirectory(SettingsDir);
             var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(SettingsPath, json);
         }

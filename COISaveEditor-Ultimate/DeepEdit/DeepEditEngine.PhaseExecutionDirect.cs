@@ -9,9 +9,7 @@ namespace COISaveEditorUltimate.DeepEdit;
 /// Direct invocation of the game's <c>BlobReader.FinalizeLoadingTimeSliced</c>.
 /// This is the preferred Phase 1/2/3 path when a populated resolver is available,
 /// because it is guaranteed to match the exact order, priority sorting, and member
-/// resolution semantics the game itself uses (see
-/// <c>workspace-files\api-decompiled-0.8.2\Mafi.Export\Mafi.Serialization\BlobReader.cs</c>,
-/// method <c>FinalizeLoadingTimeSliced</c>).
+/// resolution semantics the game itself uses.
 /// </summary>
 public sealed partial class DeepEditEngine
 {

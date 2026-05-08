@@ -1,5 +1,4 @@
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Windows;
 using COISaveEditorUltimate.DeepEdit;
 using COISaveEditorUltimate.Parsing;
@@ -7,8 +6,6 @@ using Application = System.Windows.Application;
 using MessageBoxButton = System.Windows.MessageBoxButton;
 using MessageBoxImage = System.Windows.MessageBoxImage;
 using MessageBox = System.Windows.MessageBox;
-
-[assembly: InternalsVisibleTo("COISaveEditor-Ultimate.Tests")]
 
 namespace COISaveEditorUltimate;
 

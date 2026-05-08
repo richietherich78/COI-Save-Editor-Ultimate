@@ -29,6 +29,10 @@ public sealed partial class DeepEditEngine
     // Captured data from the read phase — used by ReserialiseAllChunks
     private object? _capturedSaveInfo;        // GameSaveInfo object
     private Array?  _capturedConfigsArray;    // IConfig[] (underlying array from ImmutableArray<IConfig>)
+    // When the save uses the legacy GlobCfV2 configs header (older COI-Extended), we cannot
+    // safely deserialize configs through BlobReader's type-table mechanism.  Instead we capture
+    // the raw config bytes verbatim and write them back as-is under the modern GlobConf header.
+    private byte[]? _rawConfigsBytes;
     private object? _gameSpecialSerializers;  // ImmutableArray<ISpecialSerializerFactory> — cached for reader+writer
     private object? _populatedProtosDb;       // ProtosDb instance — injected into resolver for Phase 2
     private HashSet<object>? _phantomProtoStubs;       // Proto stubs created for mod protos not in our ProtosDb
@@ -365,6 +369,54 @@ public sealed partial class DeepEditEngine
             // ── Nullify phantom proto IDs so the game doesn't encounter unresolvable IDs
             NullifyPhantomProtoIds(logProgress);
 
+            // ── Fix null ProductStats[i].Product refs that NullifyPhantomProtoIds can't reach
+            // (ProductStats.Product is a direct field filled by ProtosDb look-up, which returns
+            // null for unknown IDs — no phantom stub is created, so NullifyPhantomProtoIds never
+            // sees them; they must be patched separately to prevent onNewDay NullRef).
+            FixProductStatsNullProducts(resolver, logProgress);
+
+            // ── Clear phantom product cargo from transport entities ─────────────────────
+            // Transport entities store in-transit cargo as ProductSlimId values (ushort
+            // indices into SlimIdManager.ManagedProtos). Slots that held mod products are
+            // now mapped to __PHANTOM__PRODUCT__* protos (no mesh asset) → every render
+            // frame fires "Trying to render product #N that has no mesh".  Clear those
+            // belts now so the game renderer never encounters the unmeshed phantom protos.
+            ClearPhantomProductCargoFromTransports(resolver, logProgress);
+
+            // ── Remove phantom food-proto entries from Settlement.m_foodTypesMap and
+            // m_foodCategories[].FoodTypes so Settlement.OnNewDay no longer calls
+            // GetMaxUnityProvidedFor on phantom FoodProto stubs, which was causing
+            // "Too many exceptions by 'onNewDay'" and collapsing unity bonuses to 0/0.
+            progress?.Report("[STEP:5k:8:Fixing settlement phantom food data…]");
+            FixSettlementPhantomFoodData(resolver, logProgress);
+
+            // ── Remove machine input/output buffers whose Product is null (mod-removed) ──
+            // Machine.initSelf → rebuildInputBuffers → ClearAndDestroyBuffer immediately
+            // dereferences buffer.Product.Type, causing NRE for any buffer whose ProductProto
+            // came back null from ReadWeakProtoRef.  Stripping those buffer slots prevents the
+            // crash; the unresolvable mod product quantity is simply discarded.
+            progress?.Report("[STEP:5k:8:Fixing machine null-product buffers…]");
+            FixMachineBuffersNullProduct(resolver, logProgress);
+
+            // ── Drop AssetTransactionManager GlobalBuffer entries whose Buffer is null
+            // or whose Buffer.Product is null/phantom.  ATM.initSelf calls
+            // ProductsManager.GetStatsFor(buffer.Product) which NREs when Product is null
+            // (mod product stripped).  Same root cause as the machine buffer pass but at
+            // the global economy registry level.
+            progress?.Report("[STEP:5k:8:Fixing AssetTransactionManager null-product buffers…]");
+            FixAssetTransactionManagerNullProductBuffers(resolver, logProgress);
+
+            // ── Drop VehicleBuffersRegistry entries that reference phantom-product
+            // protos or null entities.  RegisteredOutputBuffer.initAll() dereferences
+            // Entity.Position2f and casts Buffer to LogisticsBuffer; a stripped entity
+            // or a null/phantom-product buffer makes that NRE.  Compact both the
+            // m_registeredBuffersPerProduct dict (drop phantom-keyed entries) and the
+            // RegisteredBuffers.Input/OutputBuffers lists (drop bad RegisteredBuffer
+            // instances).  m_registeredInputBuffers/m_registeredOutputBuffers are
+            // [DoNotSave] and rebuilt from the surviving entries on load.
+            progress?.Report("[STEP:5k:8:Fixing VehicleBuffersRegistry phantom entries…]");
+            FixVehicleBuffersRegistryPhantomEntries(resolver, logProgress);
+
             // ── Drop EventBase<T> callback entries whose Owner is a removed-mod entity.
             // EventBase.m_callbacksSaveData is a Lyst<CallbackSaveData> where each struct
             // slot's Owner field holds the captured target of an Action subscriber. The
@@ -624,6 +676,7 @@ public sealed partial class DeepEditEngine
     {
         _capturedSaveInfo      = null;
         _capturedConfigsArray  = null;
+        _rawConfigsBytes       = null;
         _gameSpecialSerializers = null;
         _populatedProtosDb     = null;
         _phantomProtoStubs?.Clear();

@@ -254,8 +254,7 @@ public sealed partial class DeepEditEngine
 
             // Remove an entry if EITHER the key Type belongs to a stripped-mod assembly,
             // OR the value's runtime type does. The resolver's serializeData writes the
-            // KEY as an AQN via WriteType BEFORE writing the value (DependencyResolver.cs
-            // line 1603 in 0.8.2: `writer.WriteType(current4.Key)`), so a stripped-mod
+            // KEY as an AQN via WriteType before writing the value, so a stripped-mod
             // KEY with a vanilla value still emits the offending mod AQN into the binary —
             // which is exactly the validator violation we've been chasing.
             var pairs = dict.Cast<object>()
@@ -2541,6 +2540,55 @@ public sealed partial class DeepEditEngine
             return nge.Cast<object>().ToList();
 
         var result = new List<object>();
+
+        // ── Fast path: access the T[] backing field directly ─────────────────────────
+        // Mafi's ImmutableArray<T> is a readonly struct with a single field:
+        //   private readonly T[] m_items;
+        // It also implements the internal IImmutableArray interface which exposes
+        //   Array Array { get; }  → returns m_items
+        // Using the field directly avoids boxing/unboxing complications of invoking
+        // a struct GetEnumerator() via reflection (the enumerator itself is also a
+        // struct, and reflective MoveNext() on a boxed struct enumerator can silently
+        // return false when the IL method isn't marked as modifying 'this', causing
+        // the entire enumeration to appear empty).
+        try
+        {
+            // Try IImmutableArray.Array first (interface explicit impl, always T[]).
+            var tIImmArr = immArray.GetType().GetInterface("IImmutableArray")
+                        ?? immArray.GetType().GetInterfaces()
+                               .FirstOrDefault(i => i.Name == "IImmutableArray");
+            if (tIImmArr is not null)
+            {
+                var miArr = tIImmArr.GetProperty("Array",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (miArr is not null)
+                {
+                    var arr = miArr.GetValue(immArray) as Array;
+                    if (arr is not null)
+                    {
+                        foreach (var item in arr)
+                            result.Add(item!);
+                        return result;
+                    }
+                }
+            }
+
+            // Fallback: read m_items field directly.
+            var fiItems = FindFieldDeep(immArray.GetType(), "m_items");
+            if (fiItems is not null)
+            {
+                var arr = fiItems.GetValue(immArray) as Array;
+                if (arr is not null)
+                {
+                    foreach (var item in arr)
+                        result.Add(item!);
+                    return result;
+                }
+            }
+        }
+        catch { }
+
+        // ── Last-resort path: GetEnumerator() reflection ──────────────────────────
         try
         {
             var getEnum = immArray.GetType().GetMethod("GetEnumerator");

@@ -16,11 +16,14 @@ public sealed partial class DeepEditEngine
         return System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes);
     }
 
-    private static readonly ulong H_MOD_TYPES = ChunkHeaderULong("ModTypes");
-    private static readonly ulong H_SAVE_INFO  = ChunkHeaderULong("SaveInfo");
-    private static readonly ulong H_CONFIGS    = ChunkHeaderULong("GlobConf");
-    private static readonly ulong H_RESOLVER   = ChunkHeaderULong("Resolver");
-    private static readonly ulong H_SAVE_END   = ChunkHeaderULong("SaveStop");
+    private static readonly ulong H_MOD_TYPES  = ChunkHeaderULong("ModTypes");
+    private static readonly ulong H_SAVE_INFO   = ChunkHeaderULong("SaveInfo");
+    private static readonly ulong H_CONFIGS     = ChunkHeaderULong("GlobConf");
+    // Legacy configs header written by older COI-Extended builds; functionally identical to
+    // H_CONFIGS. We accept it on read and always write H_CONFIGS on output to modernize.
+    private static readonly ulong H_CONFIGS_V2  = ChunkHeaderULong("GlobCfV2");
+    private static readonly ulong H_RESOLVER    = ChunkHeaderULong("Resolver");
+    private static readonly ulong H_SAVE_END    = ChunkHeaderULong("SaveStop");
 
     // ── Chunk traversal ───────────────────────────────────────────────────
 
@@ -44,12 +47,24 @@ public sealed partial class DeepEditEngine
         DeserializeSaveInfo(reader);
         InvokeFinalizeLoading(reader, progress);
 
-        // CONFIGS
+        // CONFIGS (also accept legacy GlobCfV2 written by older COI-Extended builds)
         progress?.Report("  Reading CONFIGS chunk…");
         ulong h3 = (ulong)_miReadULong.Invoke(reader, null)!;
-        if (h3 != H_CONFIGS) throw new InvalidDataException($"Expected CONFIGS header, got 0x{h3:X16}.");
-        DeserializeConfigs(reader, progress);
-        // Note: FinalizeLoading for configs is called internally by deserializeConfigsWithUnknownTypeHandling.
+        if (h3 == H_CONFIGS_V2)
+        {
+            progress?.Report("  Note: legacy GlobCfV2 configs header detected — seeking past raw config bytes and modernizing to GlobConf on output.");
+            SeekPastLegacyConfigsV2(reader, progress);
+        }
+        else if (h3 != H_CONFIGS)
+        {
+            throw new InvalidDataException($"Expected CONFIGS header, got 0x{h3:X16}.");
+        }
+        else
+        {
+            DeserializeConfigs(reader, progress);
+        }
+        // Note: FinalizeLoading for configs is called internally by deserializeConfigsWithUnknownTypeHandling (GlobConf path).
+        // For GlobCfV2, FinalizeLoading is a no-op since we didn't deserialize any objects into the reader.
     }
 
     private void ReadResolverChunkHeader(object reader)
@@ -112,6 +127,76 @@ public sealed partial class DeepEditEngine
             progress?.Report($"    Config deserialization warning: {tie.InnerException.Message} — continuing anyway.");
             try { InvokeFinalizeLoading(reader, progress); } catch { /* best effort */ }
         }
+    }
+
+    /// <summary>
+    /// The GlobCfV2 format (written by older COI-Extended) serializes config type names as full
+    /// Assembly-Qualified Names embedded directly in the byte stream, rather than through BlobReader's
+    /// shared type-reference table.  Attempting to deserialize it through the normal
+    /// <c>deserializeConfigsWithUnknownTypeHandling</c> path corrupts the reader's stream position,
+    /// causing the subsequent RESOLVER header read to land in the middle of data.
+    /// <para/>
+    /// This method locates the RESOLVER chunk header bytes directly in the decompressed payload,
+    /// captures everything between the current stream position and that offset as the raw config bytes,
+    /// then seeks the BlobReader's underlying stream to the RESOLVER header so processing can continue.
+    /// The raw bytes are stored in <see cref="_rawConfigsBytes"/> for verbatim pass-through on output.
+    /// </summary>
+    private void SeekPastLegacyConfigsV2(object reader, IProgress<string>? progress)
+    {
+        // Locate the BlobReader's underlying InputStream (public property on BlobReader).
+        var tReader = reader.GetType();
+        var piInputStream = tReader.GetProperty("InputStream",
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        var stream = piInputStream?.GetValue(reader) as Stream;
+        if (stream is null || !stream.CanSeek)
+        {
+            progress?.Report("  WARNING: Cannot seek BlobReader stream — GlobCfV2 config skip failed. RESOLVER read may fail.");
+            return;
+        }
+
+        long configDataStart = stream.Position;
+
+        // The RESOLVER header bytes (reversed "Resolver") as they appear in the raw stream.
+        // We search for them from the current position forward to find where config data ends.
+        byte[] resolverMagic = System.Text.Encoding.ASCII.GetBytes(
+            new string("Resolver".Reverse().ToArray()));
+
+        // Read the rest of the stream into a buffer to search.
+        long remaining = stream.Length - stream.Position;
+        if (remaining <= 0 || remaining > 200_000_000)
+        {
+            progress?.Report($"  WARNING: Unexpected remaining stream size ({remaining} bytes) while seeking past GlobCfV2. Skipping.");
+            return;
+        }
+        byte[] buf = new byte[remaining];
+        stream.ReadExactly(buf, 0, buf.Length);
+
+        // Search for the 8-byte RESOLVER magic.
+        int resolverOffset = -1;
+        for (int i = 0; i <= buf.Length - 8; i++)
+        {
+            bool match = true;
+            for (int j = 0; j < 8; j++)
+            {
+                if (buf[i + j] != resolverMagic[j]) { match = false; break; }
+            }
+            if (match) { resolverOffset = i; break; }
+        }
+
+        if (resolverOffset < 0)
+        {
+            progress?.Report("  WARNING: RESOLVER header not found while seeking past GlobCfV2. Save may be corrupt.");
+            // Restore position
+            stream.Seek(configDataStart, SeekOrigin.Begin);
+            return;
+        }
+
+        // Capture the raw config bytes (everything from configDataStart up to the RESOLVER header).
+        _rawConfigsBytes = buf[..resolverOffset];
+        progress?.Report($"  GlobCfV2: captured {_rawConfigsBytes.Length} raw config byte(s); seeking to RESOLVER at offset {configDataStart + resolverOffset}.");
+
+        // Seek the stream to the start of the RESOLVER header so ReadResolverChunkHeader reads it correctly.
+        stream.Seek(configDataStart + resolverOffset, SeekOrigin.Begin);
     }
 
     private void InvokeFinalizeLoading(object reader, IProgress<string>? progress)
