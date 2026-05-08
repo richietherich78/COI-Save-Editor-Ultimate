@@ -1,16 +1,38 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
-    <UseWPF>true</UseWPF>
-    <UseWindowsForms>true</UseWindowsForms>
+    <!-- On Windows: produce both the WPF app (net8.0-windows) and a plain library (net8.0) for tests.
+         On Linux/WSL: produce only the plain library so tests can build without the Windows Desktop SDK. -->
+    <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('Windows'))">net8.0-windows;net8.0</TargetFrameworks>
+    <TargetFramework Condition="!$([MSBuild]::IsOSPlatform('Windows'))">net8.0</TargetFramework>
     <RootNamespace>COISaveEditorUltimate</RootNamespace>
     <AssemblyName>COISaveEditor-Ultimate</AssemblyName>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Windows-only: WPF app configuration -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <!-- Non-Windows (or plain net8.0 TFM): build as library so tests can reference it -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <OutputType>Library</OutputType>
+  </PropertyGroup>
+
+  <!-- Exclude XAML and their code-behinds from non-Windows builds -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <Compile Remove="App.xaml.cs" />
+    <Compile Remove="MainWindow.xaml.cs" />
+    <Compile Remove="SettingsWindow.xaml.cs" />
+    <Page Remove="App.xaml" />
+    <Page Remove="MainWindow.xaml" />
+    <Page Remove="SettingsWindow.xaml" />
+  </ItemGroup>
 
   <!-- Exclude workspace-files (decompiled API code, reference DLLs) from compilation -->
   <ItemGroup>
@@ -28,7 +50,7 @@
     <PackageReference Include="System.IO.Hashing" Version="8.0.0" />
   </ItemGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
     <Resource Include="Assets\logo256.png" />
     <Resource Include="Assets\app.ico" />
   </ItemGroup>

@@ -28,11 +28,13 @@ public static class SaveFileParser
 {
     // ── Chunk headers (ASCII string reversed, packed as LE uint64) ────────
 
-    private static readonly ulong H_MOD_TYPES = ChunkHeader("ModTypes");
-    private static readonly ulong H_SAVE_INFO  = ChunkHeader("SaveInfo");
-    private static readonly ulong H_CONFIGS    = ChunkHeader("GlobConf");
-    private static readonly ulong H_RESOLVER   = ChunkHeader("Resolver");
-    private static readonly ulong H_SAVE_END   = ChunkHeader("SaveStop");
+    private static readonly ulong H_MOD_TYPES  = ChunkHeader("ModTypes");
+    private static readonly ulong H_SAVE_INFO   = ChunkHeader("SaveInfo");
+    private static readonly ulong H_CONFIGS     = ChunkHeader("GlobConf");
+    // Legacy configs header written by older COI-Extended builds.
+    private static readonly ulong H_CONFIGS_V2  = ChunkHeader("GlobCfV2");
+    private static readonly ulong H_RESOLVER    = ChunkHeader("Resolver");
+    private static readonly ulong H_SAVE_END    = ChunkHeader("SaveStop");
 
     // Outer file magic: "MaFiSave" reversed as bytes
     private static readonly byte[] MAGIC = "evaS iFaM"u8.ToArray()[..8];
@@ -95,7 +97,7 @@ public static class SaveFileParser
             {
                 saveInfo = ReadSaveInfo(reader);
             }
-            else if (header == H_CONFIGS || header == H_RESOLVER)
+            else if (header == H_CONFIGS || header == H_CONFIGS_V2 || header == H_RESOLVER)
             {
                 // We don't parse these — skip to end (they fill the rest of the payload).
                 break;

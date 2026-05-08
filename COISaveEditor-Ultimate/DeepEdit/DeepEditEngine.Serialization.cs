@@ -67,10 +67,22 @@ public sealed partial class DeepEditEngine
         }
         miFinalize.Invoke(writer, null);
 
-        // ── CONFIGS (filtered) ────────────────────────────────────────────
+        // ── CONFIGS ───────────────────────────────────────────────────────
         progress?.Report("  Writing CONFIGS…");
         miWriteULong.Invoke(writer, new object[] { H_CONFIGS });
-        WriteFilteredConfigs(writer, configsArray, stripAssemblies, progress);
+        if (_rawConfigsBytes is not null)
+        {
+            // Legacy GlobCfV2 save: the raw bytes encode a Byte[] object, not an IConfig[].
+            // Writing them verbatim makes the game's loader throw CorruptedSaveException.
+            // All legacy COI-Extended configs are stripped-mod configs with no vanilla equivalent,
+            // so writing an empty IConfig[] is both correct and loadable; the game re-applies defaults.
+            progress?.Report($"    GlobCfV2 legacy configs: writing empty IConfig[] (removed-mod configs have no vanilla equivalent).");
+            WriteFilteredConfigs(writer, null, stripAssemblies, progress);
+        }
+        else
+        {
+            WriteFilteredConfigs(writer, configsArray, stripAssemblies, progress);
+        }
         miFinalize.Invoke(writer, null);
 
         // ── Switch to game special serializers before RESOLVER ────────────
@@ -113,6 +125,35 @@ public sealed partial class DeepEditEngine
         miWriteULong.Invoke(writer, new object[] { H_SAVE_END });
 
         return ExtractWriterBytes(writer);
+    }
+
+    /// <summary>
+    /// Writes <paramref name="rawBytes"/> directly to the underlying output stream of a
+    /// <c>MemoryBlobWriter</c>, bypassing all BlobWriter framing.  Used for GlobCfV2 config
+    /// pass-through: we write the raw bytes we captured during the read phase verbatim so the
+    /// game's own deserializer can read them back correctly on the next load.
+    /// </summary>
+    private static void WriteRawBytesToBlobWriter(object writer, byte[] rawBytes, IProgress<string>? progress)
+    {
+        // MemoryBlobWriter exposes BaseStream (public MemoryStream property).
+        var piBase = writer.GetType().GetProperty("BaseStream",
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        var ms = piBase?.GetValue(writer) as MemoryStream;
+
+        if (ms is null)
+        {
+            // Fallback: reflect protected OutputStream from BlobWriter base
+            var fiOut = FindFieldDeep(writer.GetType(), "OutputStream");
+            ms = fiOut?.GetValue(writer) as MemoryStream;
+        }
+
+        if (ms is null)
+        {
+            progress?.Report("  WARNING: WriteRawBytesToBlobWriter — could not access writer's MemoryStream. Raw config bytes not written.");
+            return;
+        }
+
+        ms.Write(rawBytes, 0, rawBytes.Length);
     }
 
     /// <summary>

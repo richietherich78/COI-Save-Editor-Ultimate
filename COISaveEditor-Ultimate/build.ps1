@@ -84,6 +84,7 @@ Write-Host "[4/4] Publishing ($Configuration | $Runtime | self-contained)..." -F
 $publishArgs = @(
     'publish', $project,
     '-c', $Configuration,
+    '-f', 'net8.0-windows',
     '-r', $Runtime,
     '-o', $OutputDir,
     '--self-contained', 'true',

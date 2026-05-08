@@ -15,11 +15,6 @@ namespace COISaveEditorUltimate.DeepEdit;
 /// <c>Resolve</c>, so Phase 2 member resolution and Phase 3 init calls run against
 /// a real, fully-wired graph instead of an empty one.
 /// </summary>
-/// <remarks>
-/// See <c>workspace-files\api-decompiled-0.8.2\Mafi.Core.Export\Mafi.Core.Game\GameBuilder.cs</c>
-/// (<c>RegisterModDependenciesOrThrow</c>, <c>registerDependenciesOrThrow</c>) for the
-/// production pipeline this method mirrors.
-/// </remarks>
 public sealed partial class DeepEditEngine
 {
     /// <summary>
@@ -129,10 +124,9 @@ public sealed partial class DeepEditEngine
                         .MakeGenericMethod(cfg.GetType())
                         .Invoke(builder, new object?[] { cfg, false });
 
-                    // .AsSelf().AsAllInterfaces() — match GameBuilder line 979
-                    var afterAsSelf = CallAsSelf(registrar, progress: null, label: cfg.GetType().Name);
-                    if (afterAsSelf is not null)
-                        CallAsAllInterfaces(afterAsSelf);
+                    // .AsSelf() only — the game excludes IConfig from AsAllInterfaces via the
+                    // serialization predicate; we mirror that by not calling AsAllInterfaces here.
+                    CallAsSelf(registrar, progress: null, label: cfg.GetType().Name);
                     registered++;
                 }
                 catch
@@ -146,7 +140,7 @@ public sealed partial class DeepEditEngine
         // ── Walk loaded assemblies, register [GlobalDependency] classes ───
         // Skip stripped-mod assemblies (their types are being removed) AND
         // skip our own editor assembly + non-game assemblies.
-        var iConfigType = AssemblyLoader.FindType("Mafi.IConfig");
+        var iConfigType = AssemblyLoader.FindType("Mafi.Core.Game.IConfig");
         Predicate<Type> notConfig = iConfigType is null
             ? _ => true
             : (Type t) => !iConfigType.IsAssignableFrom(t);
@@ -205,8 +199,40 @@ public sealed partial class DeepEditEngine
         }
         progress?.Report($"  [resolver-build] Asm pass: {asmRegistered} registered, {asmSkippedStripped} stripped-skip, {asmSkippedNonGame} non-game-skip, {asmFailed} failed.");
 
-        // ── Anti-tamper bypass: BuildAndClear's iterator checks BuildInfo.COUNT == 7 ─
-        // (see api-decompiled-0.8.2/Mafi.Core.Export/Mafi.Core.Game/GameBuilder.cs:411).
+        // ── Set serialization predicate: exclude IConfig types ───────────────
+        // The game sets:
+        //   builder.SetShouldSerializePredicate((t) => !t.IsAssignableTo<IConfig>())
+        // This ensures IConfig objects are only serialized in the CONFIGS chunk, NOT
+        // in the resolver sections.  If we omit this, every config instance appears in
+        // both CONFIGS and resolver section-2 (m_resolvedInstancesByRealType.Values).
+        // When the game loads that output, DeserializeInto calls
+        //   m_resolvedInstancesByRealType.AddAndAssertNew(obj.GetType(), obj)
+        // for each resolver-section-2 object. Since the CONFIGS chunk already
+        // pre-populated m_resolvedInstancesByRealType with the same concrete types, the
+        // second call fires "Duplicate key 'GameDifficultyConfig'" for every config.
+        if (iConfigType is not null)
+        {
+            try
+            {
+                var miSetSerPred = tBuilder.GetMethod("SetShouldSerializePredicate", pubInst);
+                if (miSetSerPred is not null)
+                {
+                    Predicate<Type> excludeConfigs = (Type t) => !iConfigType.IsAssignableFrom(t);
+                    miSetSerPred.Invoke(builder, new object?[] { excludeConfigs });
+                    progress?.Report("  [resolver-build] Serialization predicate set: IConfig types excluded (configs live in CONFIGS chunk only).");
+                }
+                else
+                {
+                    progress?.Report("  [resolver-build] WARNING: SetShouldSerializePredicate not found — configs may appear twice on game load (duplicate key assertions).");
+                }
+            }
+            catch (Exception ex)
+            {
+                progress?.Report($"  [resolver-build] SetShouldSerializePredicate failed: {ex.Message} — configs may appear twice on game load.");
+            }
+        }
+
+        // ── BuildAndClear's iterator checks BuildInfo.COUNT == 7 ─
         // Each of the 7 main game assemblies increments COUNT via an obfuscated static
         // ctor on first reference. We've referenced enough that COUNT *should* be 7,
         // but in practice it isn't — possibly because the obfuscated initialisers only
@@ -390,7 +416,6 @@ public sealed partial class DeepEditEngine
     /// <summary>
     /// Force <c>Mafi.BuildInfo.COUNT</c> to <c>7</c> so <c>BuildAndClear</c>'s integrity
     /// check passes. The check at
-    /// <c>api-decompiled-0.8.2/Mafi.Core.Export/Mafi.Core.Game/GameBuilder.cs:411</c>
     /// throws <c>FatalGameException</c>("Err #13") otherwise. Each game assembly is
     /// supposed to increment COUNT via an obfuscated static initialiser, but the
     /// editor's load order doesn't always trigger every initialiser, so we set the
