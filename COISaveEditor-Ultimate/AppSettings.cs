@@ -20,7 +20,6 @@ public sealed class AppSettings
         var dir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "COISaveEditorUltimate");
-        Directory.CreateDirectory(dir);
         return Path.Combine(dir, "COISaveEditor.settings.json");
     }
 
@@ -73,7 +72,9 @@ public sealed class AppSettings
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
+            var settingsDir = Path.GetDirectoryName(SettingsPath);
+            if (!string.IsNullOrEmpty(settingsDir))
+                Directory.CreateDirectory(settingsDir);
             var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(SettingsPath, json);
         }
