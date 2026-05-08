@@ -4,15 +4,25 @@ using System.Text.Json;
 namespace COISaveEditorUltimate;
 
 /// <summary>
-/// Persists user settings (game path, mod paths) to a JSON file next to the EXE.
+/// Persists user settings (game path, mod paths) to a JSON file in %LocalAppData%\COISaveEditorUltimate\.
+/// Override location via the COISE_SETTINGS_PATH environment variable (dev use only).
 /// </summary>
 public sealed class AppSettings
 {
-    private static readonly string SettingsDir =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "COISaveEditor");
+    private static readonly string SettingsPath = ResolveSettingsPath();
 
-    private static readonly string SettingsPath =
-        Path.Combine(SettingsDir, "settings.json");
+    private static string ResolveSettingsPath()
+    {
+        var envOverride = Environment.GetEnvironmentVariable("COISE_SETTINGS_PATH");
+        if (!string.IsNullOrWhiteSpace(envOverride))
+            return envOverride;
+
+        var dir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "COISaveEditorUltimate");
+        Directory.CreateDirectory(dir);
+        return Path.Combine(dir, "COISaveEditor.settings.json");
+    }
 
     // ── Properties ────────────────────────────────────────────────────────
 
@@ -63,7 +73,7 @@ public sealed class AppSettings
     {
         try
         {
-            Directory.CreateDirectory(SettingsDir);
+            Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
             var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(SettingsPath, json);
         }
